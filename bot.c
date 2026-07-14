@@ -855,8 +855,8 @@ void start_attack(char *cmd) {
     
     if (threads > MAX_THREADS) threads = MAX_THREADS;
     if (pps > 1000000) pps = 1000000;
-    if (size > 65655) size = 65655;
-    if (size < 65655) size = 65655;
+    if (size > 65507) size = 65507;
+    if (size < 64) size = 64;
     if (delay < 0) delay = 0;
     if (delay > 10000) delay = 10000;
     
