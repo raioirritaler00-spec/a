@@ -3,7 +3,6 @@
 import sys
 import time
 import base64
-import json
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -212,9 +211,9 @@ def main():
     
     args = parser.parse_args()
     
-    global PAYLOAD_URL, PAYLOAD_NAME
-    PAYLOAD_URL = args.payload_url
-    PAYLOAD_NAME = args.payload_name
+    # CORREÇÃO: usar variáveis locais em vez de globais
+    payload_url = args.payload_url
+    payload_name = args.payload_name
     
     status_thread = threading.Thread(target=status_printer, daemon=True)
     status_thread.start()
@@ -238,7 +237,7 @@ def main():
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         futures = []
         for target in targets:
-            future = executor.submit(process_target, target, PAYLOAD_URL, PAYLOAD_NAME)
+            future = executor.submit(process_target, target, payload_url, payload_name)
             futures.append(future)
         
         try:
